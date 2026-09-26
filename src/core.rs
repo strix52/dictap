@@ -149,10 +149,6 @@ impl Core {
     fn handle(&mut self, ev: Event) {
         match ev {
             Event::Toggle => self.toggle(),
-            Event::ShowHistory => {
-                // History window arrives with the UI; until then say so.
-                notice("History window isn't built yet", Tone::Info);
-            }
             Event::Power(p) => {
                 log::info!("power: {p:?}");
                 if matches!(p, PowerEvent::Suspend | PowerEvent::Lock) {
@@ -434,6 +430,7 @@ impl Core {
         } else {
             self.enforce_retention();
         }
+        crate::win::history::changed();
         log::info!("core {sid}: row {id} {status}, {} chars", text.len());
 
         if text.is_empty() {
@@ -477,6 +474,11 @@ impl Core {
     }
 
     fn retry_done(&mut self, id: i64, ev: LiveEvent) {
+        self.finish_retry(id, ev);
+        crate::win::history::changed();
+    }
+
+    fn finish_retry(&mut self, id: i64, ev: LiveEvent) {
         let (text, error) = match ev {
             LiveEvent::Done { text, error, .. } => (text, error),
             LiveEvent::Failed { error, .. } => (String::new(), Some(error)),
@@ -518,10 +520,12 @@ impl Core {
             }
             UiCmd::Retry(id) => self.retry(id),
             UiCmd::Delete(id) => match self.store.delete(id) {
-                Ok(Some(path)) => {
-                    let _ = std::fs::remove_file(path);
+                Ok(path) => {
+                    if let Some(p) = path {
+                        let _ = std::fs::remove_file(p);
+                    }
+                    crate::win::history::changed();
                 }
-                Ok(None) => {}
                 Err(e) => log::error!("delete {id}: {e}"),
             },
             UiCmd::SaveSettings(s) => {
@@ -612,6 +616,7 @@ impl Core {
                 }
             }
         };
+        crate::win::history::changed();
         match history {
             Ok(r) => notice(
                 &format!("Imported {} from OpenWhispr{key_note}", r.imported),

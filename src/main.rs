@@ -82,6 +82,8 @@ fn main() {
         spool: local.join("spool"),
         failed: local.join("failed"),
     };
+    win::history::init(dir.join("gemdict.db"));
+    win::settings_ui::init(dir.join("settings.json"), dir.join("gemdict.db"));
     // Core first, so the hook uses the saved chord from the start.
     let core = core::Core::new(paths, store, tx.clone());
     let ipc = {

@@ -14,9 +14,9 @@ use windows::Win32::System::RemoteDesktop::{
 use windows::Win32::UI::WindowsAndMessaging::{
     CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW,
     MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, RegisterClassW,
-    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_POWERBROADCAST,
-    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_LOCK,
-    WTS_SESSION_UNLOCK,
+    TranslateMessage, WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ENDSESSION,
+    WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP,
+    WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
 };
 use windows::core::w;
 
@@ -32,7 +32,7 @@ thread_local! {
     static TX: OnceCell<Sender<Event>> = const { OnceCell::new() };
 }
 
-fn send(ev: Event) {
+pub(super) fn send(ev: Event) {
     TX.with(|tx| {
         if let Some(tx) = tx.get() {
             let _ = tx.send(ev);
@@ -108,7 +108,13 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that owns the window and hook.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        unsafe { DispatchMessageW(&msg) };
+        if super::history::pre_translate(&msg) || super::settings_ui::pre_translate(&msg) {
+            continue;
+        }
+        unsafe {
+            let _ = TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
     }
     super::hook::uninstall();
     IPC.store(0, Ordering::Release);
@@ -124,7 +130,7 @@ fn reinstall_hook(hwnd: HWND) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_APP_TOGGLE => send(Event::Toggle),
-        WM_APP_SHOW => send(Event::ShowHistory),
+        WM_APP_SHOW => super::history::show(),
         WM_POWERBROADCAST => match wparam.0 as u32 {
             PBT_APMSUSPEND => send(Event::Power(PowerEvent::Suspend)),
             PBT_APMRESUMEAUTOMATIC => {
@@ -152,7 +158,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         super::tray::WM_APP_TRAY_STATE => super::tray::refresh(hwnd),
         super::tray::WM_APP_TRAY => match super::tray::on_callback(hwnd, lparam) {
-            super::tray::Action::History => send(Event::ShowHistory),
+            super::tray::Action::History => super::history::show(),
             super::tray::Action::Autostart(on) => send(Event::Ui(UiCmd::SetAutostart(on))),
             super::tray::Action::Quit => send(Event::Quit),
             super::tray::Action::None => {}

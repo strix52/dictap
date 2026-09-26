@@ -5,8 +5,6 @@ use crate::gemini::GeminiError;
 pub enum Event {
     /// Hotkey or tray: start or stop dictation.
     Toggle,
-    /// Tray click or a second instance was launched.
-    ShowHistory,
     Power(PowerEvent),
     Ui(UiCmd),
     Capture {

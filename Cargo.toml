@@ -15,6 +15,8 @@ windows = { version = "0.62", features = [
     "Win32_Media_Audio",
     "Win32_Security",
     "Win32_UI_HiDpi",
+    "Win32_UI_Controls",
+    "Win32_System_Time",
     "Win32_Security_Credentials",
     "Win32_Security_Cryptography",
     "Win32_System_DataExchange",
