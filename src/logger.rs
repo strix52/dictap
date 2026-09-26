@@ -1,4 +1,4 @@
-//! Minimal file logger: `%APPDATA%\gemdict\gemdict.log`, rotated to `.old` past 1 MB at startup.
+//! Minimal file logger: `%APPDATA%\dictap\dictap.log`, rotated to `.old` past 1 MB at startup.
 
 use std::fs::{File, OpenOptions};
 use std::io::Write;
@@ -12,7 +12,7 @@ struct FileLog(Mutex<File>);
 
 impl log::Log for FileLog {
     fn enabled(&self, m: &log::Metadata) -> bool {
-        m.level() <= log::Level::Info || m.target().starts_with("gemdict")
+        m.level() <= log::Level::Info || m.target().starts_with("dictap")
     }
 
     fn log(&self, r: &log::Record) {

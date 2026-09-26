@@ -8,6 +8,7 @@ mod event;
 mod gemini;
 mod hotkey;
 mod import;
+mod install;
 mod key;
 mod logger;
 mod paste;
@@ -26,18 +27,23 @@ use windows::Win32::System::Threading::CreateMutexW;
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
 };
-use windows::core::w;
+use windows::core::{PCWSTR, w};
+
+/// The app's name: data folders, install folder, credential and Run entry.
+pub const NAME: &str = env!("CARGO_PKG_NAME");
+/// Held for the life of the process: one instance per session.
+pub const INSTANCE_MUTEX: PCWSTR = w!("Local\\dictap-7c1e0d2a");
 
 /// Roaming: settings and history.
 fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    base.join("gemdict")
+    base.join(NAME)
 }
 
 /// Local: log and audio.
 fn local_dir() -> PathBuf {
     let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
-    base.join("gemdict")
+    base.join(NAME)
 }
 
 fn main() {
@@ -46,28 +52,36 @@ fn main() {
         overlay_demo();
         return;
     }
+    if install::handle_args() {
+        return;
+    }
+    // SAFETY: process-wide setting made before any window exists.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    // Before taking the mutex: installing starts the installed copy, which needs it.
+    if install::offer() {
+        return;
+    }
     // SAFETY: named mutex kept for the life of the process; the handle is intentionally leaked.
-    let _mutex = unsafe { CreateMutexW(None, false, w!("Local\\gemdict-7c1e0d2a")) };
+    let _mutex = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX) };
     // SAFETY: plain query right after the create call.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
         win::ipc::signal_existing(win::app::Page::from_args());
         return;
     }
-    // SAFETY: process-wide setting made before any window exists.
-    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
     let dir = data_dir();
     let local = local_dir();
     let _ = std::fs::create_dir_all(&dir);
     let _ = std::fs::create_dir_all(&local);
-    logger::init(&local.join("gemdict.log"));
-    log::info!("gemdict {} starting", env!("CARGO_PKG_VERSION"));
+    logger::init(&local.join(format!("{NAME}.log")));
+    log::info!("{NAME} {} starting", env!("CARGO_PKG_VERSION"));
     std::panic::set_hook(Box::new(|info| {
         log::error!("panic: {info}");
         log::logger().flush();
     }));
 
-    let store = match store::Store::open(&dir.join("gemdict.db")) {
+    let db = dir.join(format!("{NAME}.db"));
+    let store = match store::Store::open(&db) {
         Ok(s) => s,
         Err(e) => {
             log::error!("history database: {e}");
@@ -87,7 +101,7 @@ fn main() {
         spool: local.join("spool"),
         failed: local.join("failed"),
     };
-    win::app::init(dir.join("settings.json"), dir.join("gemdict.db"));
+    win::app::init(dir.join("settings.json"), db);
     // Core first, so the hook uses the saved chord from the start.
     let core = core::Core::new(paths, store, tx.clone());
     let ipc = {
@@ -106,7 +120,7 @@ fn main() {
     core.run(rx);
     win::ipc::quit();
     let _ = ipc.join();
-    log::info!("gemdict exiting");
+    log::info!("{NAME} exiting");
     log::logger().flush();
 }
 

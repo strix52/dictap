@@ -314,7 +314,7 @@ fn stream(
 mod tests {
     use super::*;
 
-    /// Real network test with gemdict's saved key (in memory only, never printed) and a
+    /// Real network test with dictap's saved key (in memory only, never printed) and a
     /// TTS clip at probes/speech/hello.wav (16 kHz mono PCM).
     #[test]
     #[ignore]
@@ -324,8 +324,10 @@ mod tests {
         let wav = std::fs::read("probes/speech/hello.wav").unwrap();
         let data = wav.windows(4).position(|w| w == b"data").unwrap() + 8;
         let samples: Vec<i16> = wav[data..]
-            .chunks_exact(2)
-            .map(|b| i16::from_le_bytes([b[0], b[1]]))
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .map(|b| i16::from_le_bytes(*b))
             .collect();
 
         let queue = Arc::new(LiveQueue::default());
@@ -340,7 +342,7 @@ mod tests {
         let params = Params {
             key: key.clone(),
             language: Some("en-GB".into()),
-            words: vec!["gemdict".into()],
+            words: vec!["dictap".into()],
         };
         let mut tr = Transcript::default();
         let t = Instant::now();

@@ -19,7 +19,7 @@ CREATE TABLE transcriptions (
   error       TEXT,
   paste       TEXT,
   audio_path  TEXT,
-  source      TEXT    NOT NULL DEFAULT 'gemdict',
+  source      TEXT    NOT NULL DEFAULT 'dictap',
   source_id   INTEGER,
   UNIQUE(source, source_id)
 );
@@ -304,7 +304,7 @@ mod tests {
 
     fn temp_store() -> (Store, std::path::PathBuf) {
         let dir = std::env::temp_dir().join(format!(
-            "gemdict-store-{}-{:?}",
+            "dictap-store-{}-{:?}",
             std::process::id(),
             std::thread::current().id()
         ));

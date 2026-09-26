@@ -1,4 +1,4 @@
-//! User settings in `%APPDATA%\gemdict\settings.json`. The dictionary lives in the DB,
+//! User settings in `%APPDATA%\dictap\settings.json`. The dictionary lives in the DB,
 //! the API key in Credential Manager.
 
 use crate::hotkey::Chord;
@@ -21,7 +21,7 @@ impl Default for Settings {
     fn default() -> Self {
         Settings {
             hotkey: Chord::DEFAULT.to_string(),
-            language: "en-GB".into(),
+            language: String::new(),
             sounds: true,
             keep_days: 0,
         }
@@ -70,7 +70,7 @@ mod tests {
 
     #[test]
     fn roundtrip_partial_and_corrupt() {
-        let dir = std::env::temp_dir().join(format!("gemdict-settings-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dictap-settings-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("settings.json");
         assert_eq!(Settings::load(&path), Settings::default());

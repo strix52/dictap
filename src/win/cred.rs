@@ -66,7 +66,7 @@ pub fn delete(target: &str) -> windows::core::Result<()> {
 mod tests {
     #[test]
     fn roundtrip() {
-        let target = format!("gemdict/test-{}", std::process::id());
+        let target = format!("dictap/test-{}", std::process::id());
         super::write(&target, "test", b"s3cret").unwrap();
         assert_eq!(
             super::read(&target).unwrap().as_deref(),

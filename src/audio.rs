@@ -226,7 +226,7 @@ mod tests {
 
     #[test]
     fn spool_header_and_repair() {
-        let dir = std::env::temp_dir().join(format!("gemdict-test-{}", std::process::id()));
+        let dir = std::env::temp_dir().join(format!("dictap-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("a.wav");
         let mut w = WavSpool::create(&path).unwrap();

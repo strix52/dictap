@@ -101,9 +101,9 @@ fn apply(hwnd: HWND, op: windows::Win32::UI::Shell::NOTIFY_ICON_MESSAGE) {
     set_tip(
         &mut nid,
         if recording {
-            "gemdict — listening"
+            "dictap — listening"
         } else {
-            "gemdict (Ctrl+Win to dictate)"
+            "dictap (Ctrl+Win to dictate)"
         },
     );
     // SAFETY: nid is fully initialised; the shell copies the icon, so ours is destroyed.

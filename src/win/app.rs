@@ -50,19 +50,19 @@ use windows::Win32::UI::WindowsAndMessaging::{
     DestroyIcon, DestroyMenu, DestroyWindow, EC_LEFTMARGIN, EC_RIGHTMARGIN, EN_CHANGE,
     EN_KILLFOCUS, EN_SETFOCUS, ES_AUTOHSCROLL, ES_AUTOVSCROLL, ES_MULTILINE, ES_PASSWORD,
     ES_READONLY, ES_WANTRETURN, GetClientRect, GetCursorPos, GetSystemMetrics, HICON, ICON_BIG,
-    ICON_SMALL, ICONINFO, IDC_ARROW, IsChild, IsIconic, KillTimer, LoadCursorW, MF_SEPARATOR,
-    MF_STRING, MINMAXINFO, MSG, PostMessageW, RegisterClassW, SM_CXICON, SM_CXSMICON, SW_HIDE,
-    SW_RESTORE, SW_SHOW, SWP_NOACTIVATE, SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW,
-    SetForegroundWindow, SetTimer, SetWindowPos, ShowWindow, TPM_RETURNCMD, TPM_TOPALIGN,
-    TrackPopupMenu, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND, WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC,
-    WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO, WM_KEYDOWN, WM_KILLFOCUS,
-    WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE, WM_MOUSEWHEEL, WM_PAINT,
-    WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSW, WS_CLIPCHILDREN,
-    WS_EX_DLGMODALFRAME, WS_OVERLAPPEDWINDOW, WS_VSCROLL,
+    ICON_SMALL, ICONINFO, IDC_ARROW, IMAGE_ICON, IsChild, IsIconic, KillTimer, LR_DEFAULTCOLOR,
+    LoadCursorW, LoadImageW, MF_SEPARATOR, MF_STRING, MINMAXINFO, MSG, PostMessageW,
+    RegisterClassW, SM_CXICON, SM_CXSMICON, SW_HIDE, SW_RESTORE, SW_SHOW, SWP_NOACTIVATE,
+    SWP_NOZORDER, SWP_SHOWWINDOW, SendMessageW, SetForegroundWindow, SetTimer, SetWindowPos,
+    ShowWindow, TPM_RETURNCMD, TPM_TOPALIGN, TrackPopupMenu, WM_APP, WM_CHAR, WM_CLOSE, WM_COMMAND,
+    WM_CTLCOLOREDIT, WM_CTLCOLORSTATIC, WM_DESTROY, WM_DPICHANGED, WM_ERASEBKGND, WM_GETMINMAXINFO,
+    WM_KEYDOWN, WM_KILLFOCUS, WM_LBUTTONDBLCLK, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    WM_MOUSEWHEEL, WM_PAINT, WM_SETFOCUS, WM_SETFONT, WM_SETICON, WM_SIZE, WM_TIMER, WNDCLASSW,
+    WS_CLIPCHILDREN, WS_EX_DLGMODALFRAME, WS_OVERLAPPEDWINDOW, WS_VSCROLL,
 };
 use windows::core::{HSTRING, PCSTR, PCWSTR, w};
 
-const CLASS: PCWSTR = w!("gemdict.app");
+const CLASS: PCWSTR = w!("dictap.app");
 /// Posted (from any thread) when history rows change.
 const WM_APP_CHANGED: u32 = WM_APP + 10;
 /// Posted when an EDIT loses focus; wparam = its id. Deferred so the commit never runs
@@ -753,8 +753,29 @@ fn dark_mode() {
     });
 }
 
-/// The app icon: a dark tile with the overlay's red dot and three bars.
+/// The app icon from the exe's resources, or a drawn stand-in when it was built without them.
 fn app_icon(n: i32) -> HICON {
+    // SAFETY: loads icon resource 1 of our own module at the requested size.
+    let loaded = unsafe {
+        let module = GetModuleHandleW(None).unwrap_or_default();
+        LoadImageW(
+            Some(module.into()),
+            // MAKEINTRESOURCE(1)
+            PCWSTR(std::ptr::without_provenance(1)),
+            IMAGE_ICON,
+            n,
+            n,
+            LR_DEFAULTCOLOR,
+        )
+    };
+    match loaded {
+        Ok(h) if !h.is_invalid() => HICON(h.0),
+        _ => drawn_icon(n),
+    }
+}
+
+/// A dark tile with the overlay's red dot and three bars.
+fn drawn_icon(n: i32) -> HICON {
     let mut px = vec![0u32; (n * n) as usize];
     let s = n as f32 / 32.0;
     let mut put = |x0: f32, y0: f32, x1: f32, y1: f32, rad: f32, c: Rgb| {
@@ -849,7 +870,7 @@ fn create(page: Page) -> windows::core::Result<()> {
         CreateWindowExW(
             ex,
             CLASS,
-            w!("gemdict"),
+            w!("dictap"),
             style,
             0,
             0,
@@ -1660,7 +1681,7 @@ impl App {
         p.fill(r(SIDE, 0.0, 1.0 / self.s, h), 0.0, LINE);
         p.fill(r(24.0, 25.0, 10.0, 10.0), 5.0, RED);
         p.text(
-            "gemdict",
+            "dictap",
             self.fonts.get(F::Label),
             INK,
             r(42.0, 20.0, 150.0, 20.0),
@@ -2228,7 +2249,7 @@ impl App {
 
         let hotkey_desc = if self.hotkey_error {
             (
-                "Not a shortcut gemdict understands — try Ctrl+Win or Ctrl+Alt+Space",
+                "Not a shortcut dictap understands — try Ctrl+Win or Ctrl+Alt+Space",
                 RED,
             )
         } else {
@@ -2326,7 +2347,7 @@ impl App {
             card,
             0,
             "Start with Windows",
-            ("Open gemdict in the tray when you sign in", INK3),
+            ("Open dictap in the tray when you sign in", INK3),
         );
         self.toggle(p, card, 0, autostart, Hit::Autostart);
 

@@ -228,6 +228,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "dictap"
+version = "0.1.0"
+dependencies = [
+ "base64 0.22.1",
+ "cpal",
+ "log",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tungstenite",
+ "ureq",
+ "windows",
+]
+
+[[package]]
 name = "digest"
 version = "0.11.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -331,21 +346,6 @@ dependencies = [
  "futures-task",
  "pin-project-lite",
  "slab",
-]
-
-[[package]]
-name = "gemdict"
-version = "0.1.0"
-dependencies = [
- "base64 0.22.1",
- "cpal",
- "log",
- "rusqlite",
- "serde",
- "serde_json",
- "tungstenite",
- "ureq",
- "windows",
 ]
 
 [[package]]

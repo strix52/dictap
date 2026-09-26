@@ -2,7 +2,7 @@
 
 use crate::win::cred;
 
-const TARGET: &str = "gemdict/gemini-api-key";
+const TARGET: &str = concat!(env!("CARGO_PKG_NAME"), "/gemini-api-key");
 
 /// Bytes zeroed on drop. Never Debug/Display.
 pub struct Secret(Vec<u8>);
@@ -43,5 +43,10 @@ pub fn load() -> Option<Secret> {
 }
 
 pub fn store(key: &str) -> windows::core::Result<()> {
-    cred::write(TARGET, "gemdict", key.trim().as_bytes())
+    cred::write(TARGET, crate::NAME, key.trim().as_bytes())
+}
+
+/// Deletes the saved key (uninstall).
+pub fn forget() {
+    let _ = cred::delete(TARGET);
 }

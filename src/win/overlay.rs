@@ -204,7 +204,7 @@ fn run(ready: std::sync::mpsc::Sender<()>) {
             let _ = ready.send(());
             return;
         };
-        let class = w!("gemdict.overlay");
+        let class = w!("dictap.overlay");
         let wc = WNDCLASSW {
             lpfnWndProc: Some(wndproc),
             hInstance: hinstance.into(),
@@ -217,7 +217,7 @@ fn run(ready: std::sync::mpsc::Sender<()>) {
         match CreateWindowExW(
             ex,
             class,
-            w!("gemdict"),
+            w!("dictap"),
             WS_POPUP,
             0,
             0,

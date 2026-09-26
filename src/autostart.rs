@@ -1,13 +1,17 @@
 //! Start with Windows via the HKCU `Run` key.
 
+use std::path::Path;
 use windows::Win32::System::Registry::{
     HKEY, HKEY_CURRENT_USER, KEY_QUERY_VALUE, KEY_SET_VALUE, REG_SZ, RegCloseKey, RegDeleteValueW,
     RegOpenKeyExW, RegQueryValueExW, RegSetValueExW,
 };
-use windows::core::{PCWSTR, w};
+use windows::core::{HSTRING, PCWSTR, w};
 
 const RUN: PCWSTR = w!(r"Software\Microsoft\Windows\CurrentVersion\Run");
-const NAME: PCWSTR = w!("gemdict");
+
+fn name() -> HSTRING {
+    HSTRING::from(crate::NAME)
+}
 
 fn open(access: windows::Win32::System::Registry::REG_SAM_FLAGS) -> Option<HKEY> {
     let mut key = HKEY::default();
@@ -24,24 +28,35 @@ pub fn enabled() -> bool {
     };
     // SAFETY: size-only query on an open key, then closed.
     unsafe {
-        let found = RegQueryValueExW(key, NAME, None, None, None, None).is_ok();
+        let found = RegQueryValueExW(key, &name(), None, None, None, None).is_ok();
         let _ = RegCloseKey(key);
         found
     }
 }
 
+/// Turns start-with-Windows on for this exe, or off.
 pub fn set(on: bool) -> Result<(), String> {
+    if on {
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        set_exe(Some(&exe))
+    } else {
+        set_exe(None)
+    }
+}
+
+/// Points the Run entry at `exe`, or removes it.
+pub fn set_exe(exe: Option<&Path>) -> Result<(), String> {
     let key = open(KEY_SET_VALUE).ok_or("Couldn't open the Run key")?;
+    let name = name();
     // SAFETY: open key; the data buffer is valid for the call; closed after.
     let r = unsafe {
-        let r = if on {
-            let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let r = if let Some(exe) = exe {
             let value = format!("\"{}\"", exe.display());
             let wide: Vec<u16> = value.encode_utf16().chain([0]).collect();
             let bytes = std::slice::from_raw_parts(wide.as_ptr().cast::<u8>(), wide.len() * 2);
-            RegSetValueExW(key, NAME, None, REG_SZ, Some(bytes))
+            RegSetValueExW(key, &name, None, REG_SZ, Some(bytes))
         } else {
-            match RegDeleteValueW(key, NAME) {
+            match RegDeleteValueW(key, &name) {
                 e if e == windows::Win32::Foundation::ERROR_FILE_NOT_FOUND => Default::default(),
                 e => e,
             }

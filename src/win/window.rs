@@ -159,7 +159,7 @@ pub fn message_window() -> windows::core::Result<HWND> {
         CreateWindowExW(
             WINDOW_EX_STYLE(0),
             w!("STATIC"),
-            w!("gemdict.paste"),
+            w!("dictap.paste"),
             WINDOW_STYLE(0),
             0,
             0,

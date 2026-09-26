@@ -24,7 +24,7 @@ use windows::core::w;
 pub const WM_APP_TOGGLE: u32 = WM_APP + 1;
 pub const WM_APP_SHOW: u32 = WM_APP + 2;
 
-const CLASS: windows::core::PCWSTR = w!("gemdict.ipc");
+const CLASS: windows::core::PCWSTR = w!("dictap.ipc");
 
 /// The IPC window, as an integer so other threads can post to it.
 static IPC: AtomicIsize = AtomicIsize::new(0);
@@ -58,7 +58,7 @@ pub fn quit() {
     post(WM_CLOSE);
 }
 
-/// If another gemdict is running, asks it to show `page` and returns true.
+/// If another dictap is running, asks it to show `page` and returns true.
 pub fn signal_existing(page: super::app::Page) -> bool {
     // SAFETY: plain lookup by class name.
     match unsafe { FindWindowW(CLASS, None) } {
@@ -66,6 +66,17 @@ pub fn signal_existing(page: super::app::Page) -> bool {
             // SAFETY: posting a private message to the other instance's window.
             unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(page as usize), LPARAM(0)) }
                 .is_ok()
+        }
+        _ => false,
+    }
+}
+
+/// If another instance is running, asks it to quit and returns true.
+pub fn close_existing() -> bool {
+    // SAFETY: plain lookup by class name, then a post to that window.
+    match unsafe { FindWindowW(CLASS, None) } {
+        Ok(hwnd) if !hwnd.is_invalid() => {
+            unsafe { PostMessageW(Some(hwnd), WM_CLOSE, WPARAM(0), LPARAM(0)) }.is_ok()
         }
         _ => false,
     }
@@ -87,7 +98,7 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),
             CLASS,
-            w!("gemdict"),
+            w!("dictap"),
             WS_POPUP,
             0,
             0,
