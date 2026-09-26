@@ -2,7 +2,7 @@
 //! which message-only windows don't) plus the keyboard hook, pumping messages until quit.
 //! A second instance finds the window by class name and asks it to show history.
 
-use crate::event::{Event, PowerEvent};
+use crate::event::{Event, PowerEvent, UiCmd};
 use std::cell::OnceCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -41,10 +41,15 @@ fn send(ev: Event) {
 }
 
 fn post(msg: u32) -> bool {
+    post_wparam(msg, 0)
+}
+
+pub fn post_wparam(msg: u32, wparam: usize) -> bool {
     let hwnd = IPC.load(Ordering::Acquire);
     // SAFETY: posting to a window handle we created; a stale handle just fails.
     hwnd != 0
-        && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0)) }.is_ok()
+        && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(wparam), LPARAM(0)) }
+            .is_ok()
 }
 
 /// Ends the hook thread (from any thread).
@@ -98,6 +103,7 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
         log::warn!("session notifications unavailable: {e}");
     }
     super::hook::install(hwnd)?;
+    super::tray::add(hwnd);
 
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that owns the window and hook.
@@ -140,7 +146,18 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             // SAFETY: destroying our own window on its thread.
             let _ = unsafe { DestroyWindow(hwnd) };
         }
-        WM_DESTROY => unsafe { PostQuitMessage(0) },
+        WM_DESTROY => {
+            super::tray::remove(hwnd);
+            unsafe { PostQuitMessage(0) }
+        }
+        super::tray::WM_APP_TRAY_STATE => super::tray::refresh(hwnd),
+        super::tray::WM_APP_TRAY => match super::tray::on_callback(hwnd, lparam) {
+            super::tray::Action::History => send(Event::ShowHistory),
+            super::tray::Action::Autostart(on) => send(Event::Ui(UiCmd::SetAutostart(on))),
+            super::tray::Action::Quit => send(Event::Quit),
+            super::tray::Action::None => {}
+        },
+        m if super::tray::is_taskbar_created(m) => super::tray::add(hwnd),
         // SAFETY: default handling for everything else.
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }

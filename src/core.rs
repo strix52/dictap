@@ -242,6 +242,7 @@ impl Core {
             return;
         };
         cap.stop();
+        crate::win::tray::set_recording(false);
         if self.settings.sounds {
             crate::sound::stop();
         }
@@ -285,11 +286,13 @@ impl Core {
                     cap,
                     opened: Instant::now(),
                 };
+                crate::win::tray::set_recording(true);
                 overlay::show("Listening…", Tone::Recording, None);
             }
             CaptureEvent::Failed(e) => {
                 if matches!(self.state, State::Starting { .. } | State::Recording { .. }) {
                     self.state = State::Idle;
+                    crate::win::tray::set_recording(false);
                     notice(&e, Tone::Error);
                 }
             }

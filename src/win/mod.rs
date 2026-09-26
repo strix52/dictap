@@ -7,4 +7,5 @@ pub mod hook;
 pub mod input;
 pub mod ipc;
 pub mod overlay;
+pub mod tray;
 pub mod window;

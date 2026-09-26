@@ -8,7 +8,11 @@ use windows::core::PCWSTR;
 fn blip(rising: bool) -> Vec<u8> {
     const RATE: f32 = 16_000.0;
     let n = 1_900; // ~120 ms
-    let (f0, f1) = if rising { (660.0, 990.0) } else { (990.0, 660.0) };
+    let (f0, f1) = if rising {
+        (660.0, 990.0)
+    } else {
+        (990.0, 660.0)
+    };
     let mut phase = 0f32;
     let samples: Vec<i16> = (0..n)
         .map(|i| {

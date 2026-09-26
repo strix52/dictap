@@ -84,7 +84,7 @@ fn main() {
     };
     // Core first, so the hook uses the saved chord from the start.
     let core = core::Core::new(paths, store, tx.clone());
-    {
+    let ipc = {
         let tx = tx.clone();
         std::thread::Builder::new()
             .name("ipc".into())
@@ -94,10 +94,12 @@ fn main() {
                 }
                 let _ = tx.send(Event::Quit);
             })
-            .expect("spawn ipc thread");
-    }
+            .expect("spawn ipc thread")
+    };
     drop(tx);
     core.run(rx);
+    win::ipc::quit();
+    let _ = ipc.join();
     log::info!("gemdict exiting");
     log::logger().flush();
 }
