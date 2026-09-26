@@ -60,7 +60,7 @@ pub fn transcribe(
         ));
     }
     let body = protocol::batch_body(wav, language, words);
-    let timeout = TIMEOUT + Duration::from_secs((body.len() / UPLINK) as u64);
+    let timeout = timeout(body.len());
     let mut resp = agent()
         .post(URL)
         .config()
@@ -102,6 +102,15 @@ pub struct Job {
     pub wav: PathBuf,
     /// Live's text so far, kept as provisional if batch fails.
     pub partial: String,
+}
+
+fn timeout(body_len: usize) -> Duration {
+    TIMEOUT + Duration::from_secs((body_len / UPLINK) as u64)
+}
+
+/// The longest a batch run of this WAV can take (base64 grows the body by a third).
+pub fn max_wait(wav_len: u64) -> Duration {
+    timeout(wav_len as usize / 3 * 4 + 64 * 1024)
 }
 
 /// Runs batch on its own thread and reports the final verdict as `LiveEvent::Done`.

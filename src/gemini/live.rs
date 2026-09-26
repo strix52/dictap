@@ -314,13 +314,12 @@ fn stream(
 mod tests {
     use super::*;
 
-    /// Real network test with OpenWhispr's key (in memory only, never printed) and a
+    /// Real network test with gemdict's saved key (in memory only, never printed) and a
     /// TTS clip at probes/speech/hello.wav (16 kHz mono PCM).
     #[test]
     #[ignore]
     fn live_and_batch_real() {
-        let dir = crate::import::openwhispr_dir().unwrap();
-        let key = Arc::new(crate::import::api_key(&dir).unwrap());
+        let key = Arc::new(crate::key::load().expect("key in Credential Manager"));
         let k = key.as_str().unwrap();
         let wav = std::fs::read("probes/speech/hello.wav").unwrap();
         let data = wav.windows(4).position(|w| w == b"data").unwrap() + 8;

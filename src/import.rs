@@ -314,34 +314,3 @@ mod tests {
         }
     }
 }
-
-#[cfg(test)]
-mod real_tests {
-    use super::*;
-
-    /// Runs against this machine's OpenWhispr data (read-only). Never prints the key.
-    #[test]
-    #[ignore]
-    fn import_real_openwhispr() {
-        let dir = openwhispr_dir().expect("OpenWhispr data dir");
-        let db = std::env::temp_dir().join(format!("gemdict-import-{}.db", std::process::id()));
-        let mut store = Store::open(&db).unwrap();
-        let first = history(&mut store, &dir).unwrap();
-        let again = history(&mut store, &dir).unwrap();
-        eprintln!("first: {first:?}\nagain: {again:?}");
-        assert!(first.imported > 700 && again.imported == 0 && again.existing == first.imported);
-        eprintln!("dictionary words: {}", store.dictionary().unwrap().len());
-        drop(store);
-        let _ = std::fs::remove_file(&db);
-
-        let key = decrypt_key(&dir).unwrap();
-        let k = key.as_str().unwrap();
-        // Classic keys start "AIza"; newer ones "AQ.".
-        let body = k.strip_prefix("AQ.").unwrap_or(k);
-        let well_formed = body
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_');
-        assert!(k.len() >= 30 && well_formed, "key shape unexpected");
-        eprintln!("key: decrypted OK ({} chars)", k.len());
-    }
-}

@@ -24,6 +24,13 @@ const MAX_RECORDING: Duration = Duration::from_secs(9 * 60 + 45);
 /// How long quit waits for a finishing dictation; its spool WAV is recovered next start.
 const QUIT_WAIT: Duration = Duration::from_secs(5);
 const NOTICE: Duration = Duration::from_secs(4);
+/// How long after stopping to wait for Live's verdict before giving up (Live itself
+/// finishes within seconds; this only catches a hang).
+const FINISH_WAIT: Duration = Duration::from_secs(45);
+/// Extra slack on top of batch's own request timeout.
+const BATCH_SLACK: Duration = Duration::from_secs(20);
+/// A second press within this long cancels a transcription.
+const CANCEL_WINDOW: Duration = Duration::from_secs(3);
 const KEEP_FILES: usize = 20;
 const KEEP_BYTES: u64 = 200 << 20;
 
@@ -47,6 +54,10 @@ struct Finish {
     capture_reason: Option<String>,
     live: Option<LiveEvent>,
     batch_started: bool,
+    /// Give up waiting after this; the audio goes to history for Retry.
+    give_up: Instant,
+    /// Set by a press while transcribing; a second press before it cancels.
+    cancel_armed: Option<Instant>,
 }
 
 pub struct Core {
@@ -139,7 +150,8 @@ impl Core {
         let state = match &self.state {
             State::Starting { deadline, .. } => Some(*deadline),
             State::Recording { opened, .. } => Some(*opened + MAX_RECORDING),
-            _ => None,
+            State::Finishing(f) => Some(f.give_up),
+            State::Idle => None,
         };
         match (state, self.quit_by) {
             (Some(a), Some(b)) => Some(a.min(b)),
@@ -163,6 +175,10 @@ impl Core {
             State::Finishing(_) if self.quit_by.is_some_and(|q| now >= q) => {
                 log::warn!("core {}: quitting before the dictation finished", self.sid);
                 self.state = State::Idle;
+            }
+            State::Finishing(f) if now >= f.give_up => {
+                log::warn!("core {}: transcription timed out", self.sid);
+                self.abandon("Transcription timed out");
             }
             _ => {}
         }
@@ -237,8 +253,35 @@ impl Core {
                 overlay::hide();
             }
             State::Recording { .. } => self.stop_recording(),
-            State::Finishing(_) => notice("Still transcribing the last one…", Tone::Busy),
+            State::Finishing(f) => {
+                if f.cancel_armed.is_some_and(|t| t.elapsed() < CANCEL_WINDOW) {
+                    log::info!("core {}: transcription cancelled", self.sid);
+                    self.abandon("Cancelled");
+                } else {
+                    let now = Instant::now();
+                    if let State::Finishing(f) = &mut self.state {
+                        f.cancel_armed = Some(now);
+                    }
+                    overlay::status("Transcribing — press again to cancel", Tone::Busy, None);
+                }
+            }
         }
+    }
+
+    /// Ends a finishing dictation without a result. Whatever audio exists is kept in
+    /// history as a failed row, so Retry can still transcribe it.
+    fn abandon(&mut self, why: &str) {
+        let State::Finishing(f) = &self.state else {
+            return;
+        };
+        let duration_ms = f.duration_ms.unwrap_or(0);
+        self.commit(
+            duration_ms,
+            String::new(),
+            false,
+            None,
+            Some(GeminiError::Other(why.into())),
+        );
     }
 
     fn start(&mut self) {
@@ -286,6 +329,8 @@ impl Core {
             capture_reason: None,
             live: None,
             batch_started: false,
+            give_up: Instant::now() + FINISH_WAIT,
+            cancel_armed: None,
         });
         overlay::status("Transcribing…", Tone::Busy, None);
     }
@@ -382,19 +427,27 @@ impl Core {
         if f.live.is_none() {
             f.live = self.pending_live.take();
         }
-        let (Some(duration_ms), Some(live)) = (f.duration_ms, f.live.take()) else {
+        // Both must be in before taking Live's verdict: it often lands before capture
+        // finishes writing the WAV, and must survive until then.
+        let Some(duration_ms) = f.duration_ms else {
+            return;
+        };
+        let Some(live) = f.live.take() else {
             return;
         };
         let sid = self.sid;
         match live {
             LiveEvent::Failed { error, partial } if error.is_retryable() && !f.batch_started => {
                 f.batch_started = true;
+                let wav = self.paths.spool.join(format!("{sid}.wav"));
+                let len = std::fs::metadata(&wav).map_or(0, |m| m.len());
+                f.give_up = Instant::now() + batch::max_wait(len) + BATCH_SLACK;
                 log::info!("core {sid}: live failed ({error:?}); batch fallback");
                 let job = batch::Job {
                     key: self.key.clone().expect("checked at start"),
                     language: self.settings.language().map(str::to_string),
                     words: self.store.dictionary().unwrap_or_default(),
-                    wav: self.spool_path(sid),
+                    wav,
                     partial,
                 };
                 batch::spawn(sid, job, self.events.clone());
