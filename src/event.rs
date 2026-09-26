@@ -61,5 +61,7 @@ pub enum LiveEvent {
         model: &'static str,
         error: Option<GeminiError>,
     },
-    Failed(GeminiError),
+    /// Live failed before a result. `partial` is whatever it had transcribed; core decides
+    /// on the batch fallback once capture has finalized the WAV.
+    Failed { error: GeminiError, partial: String },
 }

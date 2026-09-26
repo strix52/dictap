@@ -51,7 +51,7 @@ impl LiveQueue {
         self.state.lock().unwrap_or_else(|e| e.into_inner())
     }
 
-    fn push(&self, samples: &[i16]) {
+    pub fn push(&self, samples: &[i16]) {
         let mut s = self.lock();
         if s.overflowed {
             return;
@@ -65,24 +65,25 @@ impl LiveQueue {
         self.cv.notify_one();
     }
 
-    fn close(&self) {
+    pub fn close(&self) {
         self.lock().closed = true;
         self.cv.notify_one();
     }
 
-    /// Takes up to `max` samples, waiting up to `timeout` for any to arrive.
-    pub fn pop(&self, max: usize, timeout: Duration) -> Pop {
+    /// Takes exactly `frame` samples once that many are queued, waiting up to `timeout`.
+    /// After capture closes, a shorter remainder is returned.
+    pub fn pop(&self, frame: usize, timeout: Duration) -> Pop {
         let s = self.lock();
         let (mut s, _) = self
             .cv
             .wait_timeout_while(s, timeout, |s| {
-                s.samples.is_empty() && !s.closed && !s.overflowed
+                s.samples.len() < frame && !s.closed && !s.overflowed
             })
             .unwrap_or_else(|e| e.into_inner());
         if s.overflowed {
             Pop::Overflowed
-        } else if !s.samples.is_empty() {
-            let n = max.min(s.samples.len());
+        } else if s.samples.len() >= frame || (s.closed && !s.samples.is_empty()) {
+            let n = frame.min(s.samples.len());
             Pop::Data(s.samples.drain(..n).collect())
         } else if s.closed {
             Pop::Closed
@@ -262,6 +263,7 @@ mod tests {
         let q = LiveQueue::default();
         assert!(matches!(q.pop(10, Duration::from_millis(1)), Pop::Empty));
         q.push(&[1, 2, 3]);
+        assert!(matches!(q.pop(4, Duration::ZERO), Pop::Empty));
         assert!(matches!(q.pop(2, Duration::ZERO), Pop::Data(v) if v == [1, 2]));
         q.close();
         assert!(matches!(q.pop(10, Duration::ZERO), Pop::Data(v) if v == [3]));

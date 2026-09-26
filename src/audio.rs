@@ -70,7 +70,7 @@ pub fn to_i16(s: f32) -> i16 {
     (s.clamp(-1.0, 1.0) * 32767.0).round() as i16
 }
 
-fn header(data_len: u32) -> [u8; 44] {
+pub fn header(data_len: u32) -> [u8; 44] {
     let mut h = [0u8; 44];
     let fields: [(usize, &[u8]); 13] = [
         (0, b"RIFF"),
