@@ -1,7 +1,10 @@
 //! Small helpers shared by the history and settings windows (ipc thread only).
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::{CreateFontIndirectW, HFONT};
+use windows::Win32::Graphics::Gdi::{
+    CreateCompatibleDC, CreateFontIndirectW, CreateFontW, DeleteDC, DeleteObject, GetTextFaceW,
+    HFONT, HGDIOBJ, SelectObject,
+};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
 use windows::Win32::UI::WindowsAndMessaging::{
@@ -24,6 +27,46 @@ pub fn dpi(h: HWND) -> u32 {
 /// Scales 96-dpi pixels.
 pub fn px(v: i32, dpi: u32) -> i32 {
     v * dpi as i32 / 96
+}
+
+/// Segoe UI Variable Text where installed (Windows 11), else Segoe UI.
+pub fn face() -> &'static str {
+    static FACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    FACE.get_or_init(|| {
+        const WANT: &str = "Segoe UI Variable Text";
+        // SAFETY: a scratch DC and font, both released here. GDI substitutes a different
+        // face when the requested one is missing; GetTextFaceW reports what it picked.
+        unsafe {
+            let dc = CreateCompatibleDC(None);
+            let f = CreateFontW(
+                -12,
+                0,
+                0,
+                0,
+                400,
+                0,
+                0,
+                0,
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                Default::default(),
+                0,
+                &HSTRING::from(WANT),
+            );
+            let old = SelectObject(dc, HGDIOBJ(f.0));
+            let mut buf = [0u16; 64];
+            let n = GetTextFaceW(dc, Some(&mut buf)).max(1) as usize - 1;
+            SelectObject(dc, old);
+            let _ = DeleteObject(HGDIOBJ(f.0));
+            let _ = DeleteDC(dc);
+            if String::from_utf16_lossy(&buf[..n.min(buf.len())]).eq_ignore_ascii_case(WANT) {
+                WANT
+            } else {
+                "Segoe UI"
+            }
+        }
+    })
 }
 
 /// The system message font at this dpi. The caller owns it.

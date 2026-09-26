@@ -24,6 +24,10 @@ const FRAMES_PER_PASS: usize = 10;
 const KEEPALIVE: Duration = Duration::from_secs(15);
 const FINISH_WAIT: Duration = Duration::from_secs(3);
 const TICK: Duration = Duration::from_millis(10);
+/// At most this often, the overlay gets the transcript so far.
+const PARTIAL_EVERY: Duration = Duration::from_millis(100);
+
+type OnText<'a> = &'a mut dyn FnMut(&Transcript) -> bool;
 
 type Ws = WebSocket<MaybeTlsStream<TcpStream>>;
 
@@ -40,7 +44,29 @@ pub fn spawn(sid: u64, params: Params, queue: Arc<LiveQueue>, events: Sender<Eve
             let key = params.key.as_str().unwrap_or("");
             let mut tr = Transcript::default();
             let started = Instant::now();
-            let ev = match run(key, &params, &queue, &mut tr) {
+            let mut shown = (String::new(), String::new());
+            let mut last = Instant::now()
+                .checked_sub(PARTIAL_EVERY)
+                .unwrap_or_else(Instant::now);
+            let partials = events.clone();
+            // Returns false when throttled, so the caller tries again next pass.
+            let mut on_text = |tr: &Transcript| {
+                if last.elapsed() < PARTIAL_EVERY {
+                    return false;
+                }
+                let (finals, interim) = tr.parts();
+                if finals != shown.0 || interim != shown.1 {
+                    last = Instant::now();
+                    shown = (finals, interim.to_string());
+                    let _ = partials.send(Event::LiveText {
+                        sid,
+                        finals: shown.0.clone(),
+                        interim: shown.1.clone(),
+                    });
+                }
+                true
+            };
+            let ev = match run(key, &params, &queue, &mut tr, &mut on_text) {
                 Ok(()) => {
                     let (text, provisional) = tr.result();
                     log::info!(
@@ -167,13 +193,19 @@ fn send(ws: &mut Ws, msg: Message, key: &str) -> Result<(), GeminiError> {
 
 /// Streams until the queue closes and the server finishes the turn. On error, `tr` keeps
 /// whatever was transcribed so far.
-fn run(key: &str, p: &Params, queue: &LiveQueue, tr: &mut Transcript) -> Result<(), GeminiError> {
+fn run(
+    key: &str,
+    p: &Params,
+    queue: &LiveQueue,
+    tr: &mut Transcript,
+    on_text: OnText,
+) -> Result<(), GeminiError> {
     if key.is_empty() {
         return Err(GeminiError::KeyMissing);
     }
     let deadline = Instant::now() + CONNECT_BUDGET;
     let mut ws = connect(key, p, deadline)?;
-    let result = stream(&mut ws, key, queue, tr, deadline);
+    let result = stream(&mut ws, key, queue, tr, deadline, on_text);
     let _ = ws.close(None);
     let _ = ws.flush();
     result
@@ -185,11 +217,13 @@ fn stream(
     queue: &LiveQueue,
     tr: &mut Transcript,
     setup_deadline: Instant,
+    on_text: OnText,
 ) -> Result<(), GeminiError> {
     let mut setup = false;
     let mut end_sent: Option<Instant> = None;
     let mut last_ping = Instant::now();
     let mut awaiting_pong = false;
+    let mut dirty = false;
 
     loop {
         // Read everything available.
@@ -224,7 +258,11 @@ fn stream(
             if let Some(m) = protocol::parse_server(&text) {
                 setup |= m.setup_complete;
                 tr.apply(&m);
+                dirty |= m.interim.is_some() || m.final_text.is_some();
             }
+        }
+        if dirty && on_text(tr) {
+            dirty = false;
         }
 
         if let Some(at) = end_sent {
@@ -307,7 +345,7 @@ mod tests {
         };
         let mut tr = Transcript::default();
         let t = Instant::now();
-        let r = run(k, &params, &queue, &mut tr);
+        let r = run(k, &params, &queue, &mut tr, &mut |_| true);
         feeder.join().unwrap();
         eprintln!(
             "live: {r:?} in {} ms -> {:?}",

@@ -41,6 +41,11 @@ fn local_dir() -> PathBuf {
 }
 
 fn main() {
+    #[cfg(debug_assertions)]
+    if std::env::args().any(|a| a == "--overlay-demo") {
+        overlay_demo();
+        return;
+    }
     // SAFETY: named mutex kept for the life of the process; the handle is intentionally leaked.
     let _mutex = unsafe { CreateMutexW(None, false, w!("Local\\gemdict-7c1e0d2a")) };
     // SAFETY: plain query right after the create call.
@@ -104,4 +109,29 @@ fn main() {
     let _ = ipc.join();
     log::info!("gemdict exiting");
     log::logger().flush();
+}
+
+/// Debug builds: walks the overlay through its states for eyeballing.
+#[cfg(debug_assertions)]
+fn overlay_demo() {
+    // SAFETY: process-wide setting made before any window exists.
+    let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
+    let pause = |s| std::thread::sleep(Duration::from_millis(s));
+    overlay::show("Listening…", Tone::Recording, None);
+    pause(2500);
+    let said = "so the thing I wanted to mention is that the overlay now shows what you are saying while you are still saying it and older lines fade out once there are more than four of them on screen, which keeps the card small and calm even when you ramble on for a good long while about nothing in particular";
+    let words: Vec<&str> = said.split(' ').collect();
+    for n in 1..=words.len() {
+        let finals = words[..n.saturating_sub(3)].join(" ");
+        let interim = words[n.saturating_sub(3)..n].join(" ");
+        overlay::words(&finals, &interim);
+        pause(if n == 12 { 2500 } else { 180 });
+    }
+    pause(2500);
+    overlay::status("Transcribing…", Tone::Busy, None);
+    pause(2500);
+    overlay::status("Couldn't paste — copied to clipboard", Tone::Error, Some(Duration::from_secs(3)));
+    pause(3500);
+    overlay::show("Nothing heard", Tone::Info, Some(Duration::from_secs(2)));
+    pause(2500);
 }

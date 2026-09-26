@@ -15,6 +15,12 @@ pub enum Event {
         sid: u64,
         ev: LiveEvent,
     },
+    /// The transcript so far while Live is streaming: settled text and the interim tail.
+    LiveText {
+        sid: u64,
+        finals: String,
+        interim: String,
+    },
     Pasted(crate::paste::Pasted),
     Quit,
 }

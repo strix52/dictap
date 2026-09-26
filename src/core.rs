@@ -157,6 +157,15 @@ impl Core {
             }
             Event::Ui(cmd) => self.ui(cmd),
             Event::Capture { sid, ev } => self.capture_event(sid, ev),
+            Event::LiveText {
+                sid,
+                finals,
+                interim,
+            } => {
+                if sid == self.sid {
+                    self.partial(&finals, &interim);
+                }
+            }
             Event::Live { sid, ev } => {
                 if let Some(row) = self.retries.remove(&sid) {
                     self.retry_done(row, ev);
@@ -169,7 +178,8 @@ impl Core {
                     log::error!("store paste: {e}");
                 }
                 match p.outcome.notice() {
-                    Some(n) => notice(n, Tone::Error),
+                    // Keep the words on screen so the user can see what didn't land.
+                    Some(n) => overlay::status(n, Tone::Error, Some(NOTICE)),
                     None => overlay::hide(),
                 }
             }
@@ -255,7 +265,7 @@ impl Core {
             live: None,
             batch_started: false,
         });
-        overlay::show("Transcribing…", Tone::Busy, None);
+        overlay::status("Transcribing…", Tone::Busy, None);
     }
 
     fn capture_event(&mut self, sid: u64, ev: CaptureEvent) {
@@ -307,6 +317,13 @@ impl Core {
                 }
                 self.advance();
             }
+        }
+    }
+
+    /// Shows the transcript so far while recording or finishing.
+    fn partial(&self, finals: &str, interim: &str) {
+        if matches!(self.state, State::Recording { .. } | State::Finishing(_)) {
+            overlay::words(finals, interim);
         }
     }
 

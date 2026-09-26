@@ -105,7 +105,12 @@ pub fn changed() {
     if h != 0 {
         // SAFETY: a stale handle just fails.
         let _ = unsafe {
-            PostMessageW(Some(HWND(h as *mut _)), WM_APP_CHANGED, WPARAM(0), LPARAM(0))
+            PostMessageW(
+                Some(HWND(h as *mut _)),
+                WM_APP_CHANGED,
+                WPARAM(0),
+                LPARAM(0),
+            )
         };
     }
 }
@@ -248,7 +253,12 @@ fn build(hwnd: HWND, dpi: u32) -> Ctl {
             pszText: PWSTR(name.as_ptr().cast_mut()),
             ..Default::default()
         };
-        ui::send(list, LVM_INSERTCOLUMNW, i, std::ptr::from_ref(&col) as isize);
+        ui::send(
+            list,
+            LVM_INSERTCOLUMNW,
+            i,
+            std::ptr::from_ref(&col) as isize,
+        );
     }
     let detail = ui::child(
         hwnd,
@@ -293,7 +303,10 @@ fn layout(hwnd: HWND) {
     let list_top = m + row + m;
     let buttons_top = h - m - row;
     let detail_top = buttons_top - m - detail_h;
-    ui::place(c.list, rect(m, list_top, w - 2 * m, detail_top - m - list_top));
+    ui::place(
+        c.list,
+        rect(m, list_top, w - 2 * m, detail_top - m - list_top),
+    );
     ui::place(c.detail, rect(m, detail_top, w - 2 * m, detail_h));
     ui::place(c.copy, rect(m, buttons_top, bw, row));
     ui::place(c.retry, rect(m + bw + m, buttons_top, bw, row));
@@ -321,7 +334,12 @@ fn select(c: &Ctl, i: usize) {
         state: LIST_VIEW_ITEM_STATE_FLAGS(on),
         ..Default::default()
     };
-    ui::send(c.list, LVM_SETITEMSTATE, i, std::ptr::from_ref(&item) as isize);
+    ui::send(
+        c.list,
+        LVM_SETITEMSTATE,
+        i,
+        std::ptr::from_ref(&item) as isize,
+    );
     if i != usize::MAX {
         ui::send(c.list, LVM_ENSUREVISIBLE, i, 0);
     }
@@ -498,7 +516,9 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
             let r = unsafe { *(lparam.0 as *const RECT) };
             if let Some(mut c) = ctl() {
                 let font = ui::font((wparam.0 & 0xFFFF) as u32);
-                for h in [c.search, c.list, c.detail, c.copy, c.retry, c.delete, c.settings] {
+                for h in [
+                    c.search, c.list, c.detail, c.copy, c.retry, c.delete, c.settings,
+                ] {
                     ui::send(h, WM_SETFONT, font.0 as usize, 1);
                 }
                 // SAFETY: no control uses the old font any more.

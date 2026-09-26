@@ -137,6 +137,11 @@ impl Transcript {
         }
     }
 
+    /// (settled text, interim tail) for display.
+    pub fn parts(&self) -> (String, &str) {
+        (self.finals.join(" "), &self.interim)
+    }
+
     /// (text, provisional): finals joined; any trailing interim is added and marks it provisional.
     pub fn result(&self) -> (String, bool) {
         let finals = self.finals.join(" ");
