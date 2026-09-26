@@ -18,6 +18,11 @@ use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const OPEN_TIMEOUT: Duration = Duration::from_secs(3);
+/// Gemini Live ends a session at 10 minutes; stop a little before so the last words come
+/// back. The overlay counts down the final seconds.
+const MAX_RECORDING: Duration = Duration::from_secs(9 * 60 + 45);
+/// How long quit waits for a finishing dictation; its spool WAV is recovered next start.
+const QUIT_WAIT: Duration = Duration::from_secs(5);
 const NOTICE: Duration = Duration::from_secs(4);
 const KEEP_FILES: usize = 20;
 const KEEP_BYTES: u64 = 200 << 20;
@@ -58,7 +63,8 @@ pub struct Core {
     retries: HashMap<u64, i64>,
     /// Live's verdict if it arrived while still recording.
     pending_live: Option<LiveEvent>,
-    quitting: bool,
+    /// Set on quit: when to stop waiting for a finishing dictation.
+    quit_by: Option<Instant>,
 }
 
 fn now_ms() -> i64 {
@@ -90,7 +96,7 @@ impl Core {
             started_ms: 0,
             retries: HashMap::new(),
             pending_live: None,
-            quitting: false,
+            quit_by: None,
         };
         core.recover_spool();
         core.first_run_import();
@@ -123,27 +129,42 @@ impl Core {
                 Some(ev) => self.handle(ev),
                 None => self.on_deadline(),
             }
-            if self.quitting && matches!(self.state, State::Idle) {
+            if self.quit_by.is_some() && matches!(self.state, State::Idle) {
                 return;
             }
         }
     }
 
     fn deadline(&self) -> Option<Instant> {
-        match &self.state {
+        let state = match &self.state {
             State::Starting { deadline, .. } => Some(*deadline),
+            State::Recording { opened, .. } => Some(*opened + MAX_RECORDING),
             _ => None,
+        };
+        match (state, self.quit_by) {
+            (Some(a), Some(b)) => Some(a.min(b)),
+            (a, b) => a.or(b),
         }
     }
 
     fn on_deadline(&mut self) {
-        if let State::Starting { cap, deadline } = &self.state
-            && Instant::now() >= *deadline
-        {
-            cap.stop();
-            self.state = State::Idle;
-            log::warn!("core {}: microphone didn't open in time", self.sid);
-            notice("Microphone didn't respond", Tone::Error);
+        let now = Instant::now();
+        match &self.state {
+            State::Starting { cap, deadline } if now >= *deadline => {
+                cap.stop();
+                self.state = State::Idle;
+                log::warn!("core {}: microphone didn't open in time", self.sid);
+                notice("Microphone didn't respond", Tone::Error);
+            }
+            State::Recording { opened, .. } if now >= *opened + MAX_RECORDING => {
+                log::info!("core {}: recording limit reached", self.sid);
+                self.stop_recording();
+            }
+            State::Finishing(_) if self.quit_by.is_some_and(|q| now >= q) => {
+                log::warn!("core {}: quitting before the dictation finished", self.sid);
+                self.state = State::Idle;
+            }
+            _ => {}
         }
     }
 
@@ -178,14 +199,14 @@ impl Core {
                 if let Err(e) = self.store.set_paste(p.row_id, &p.outcome.db_value()) {
                     log::error!("store paste: {e}");
                 }
-                match p.outcome.notice() {
+                match p.outcome.notice(p.incomplete) {
                     // Keep the words on screen so the user can see what didn't land.
-                    Some(n) => overlay::status(n, Tone::Error, Some(NOTICE)),
+                    Some((n, tone)) => overlay::status(n, tone, Some(NOTICE)),
                     None => overlay::done(),
                 }
             }
             Event::Quit => {
-                self.quitting = true;
+                self.quit_by = Some(Instant::now() + QUIT_WAIT);
                 match &self.state {
                     State::Starting { cap, .. } => {
                         cap.stop();
@@ -295,14 +316,22 @@ impl Core {
                 };
                 crate::win::tray::set_recording(true);
                 overlay::show("Listening…", Tone::Recording, None);
+                overlay::limit(MAX_RECORDING);
             }
-            CaptureEvent::Failed(e) => {
-                if matches!(self.state, State::Starting { .. } | State::Recording { .. }) {
+            CaptureEvent::Failed(e) => match &mut self.state {
+                State::Starting { .. } | State::Recording { .. } => {
                     self.state = State::Idle;
                     crate::win::tray::set_recording(false);
                     notice(&e, Tone::Error);
                 }
-            }
+                // The WAV couldn't be finalized after stop; Live's text can still land.
+                State::Finishing(f) => {
+                    f.duration_ms = Some(0);
+                    f.capture_reason = Some(e);
+                    self.advance();
+                }
+                State::Idle => {}
+            },
             CaptureEvent::Ended {
                 duration_ms,
                 dropped,
@@ -464,6 +493,7 @@ impl Core {
             row_id: id,
             text,
             target: f.target,
+            incomplete: error.is_some(),
         }));
     }
 

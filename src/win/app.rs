@@ -1490,8 +1490,10 @@ impl App {
         let mut size = windows::Win32::Foundation::SIZE::default();
         // SAFETY: our DC and font.
         unsafe {
-            SelectObject(self.dc, HGDIOBJ(self.fonts.get(f).0));
+            // Deselected again so a font set can be deleted (DPI change) while the DC lives.
+            let old = SelectObject(self.dc, HGDIOBJ(self.fonts.get(f).0));
             let _ = GetTextExtentPoint32W(self.dc, &wide, &mut size);
+            SelectObject(self.dc, old);
         }
         size.cx as f32 / self.s
     }

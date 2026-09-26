@@ -91,6 +91,12 @@ const WORD_IN: Duration = Duration::from_millis(220);
 const CONTENT_IN: Duration = Duration::from_millis(180);
 const CHECK_DRAW: Duration = Duration::from_millis(260);
 const DONE_HOLD: Duration = Duration::from_millis(900);
+/// The recording limit's countdown shows for this long before the cut-off.
+const COUNTDOWN: Duration = Duration::from_secs(10);
+/// Below this many seconds left the countdown turns red.
+const COUNTDOWN_RED: u64 = 3;
+const PILL_H: f32 = 20.0;
+const PILL_PAD: f32 = 7.0;
 
 const WM_APP_UPDATE: u32 = WM_APP + 10;
 const HIDE_TIMER: usize = 1;
@@ -108,6 +114,8 @@ enum Cmd {
         clear: bool,
     },
     Words(String, String),
+    /// When recording will be cut off.
+    Limit(Instant),
     Done,
     Hide,
 }
@@ -140,6 +148,11 @@ pub fn status(text: &str, tone: Tone, hide_after: Option<Duration>) {
 /// The live transcript so far: settled text and the interim tail.
 pub fn words(finals: &str, interim: &str) {
     send(Cmd::Words(finals.to_string(), interim.to_string()));
+}
+
+/// Recording stops `after` from now; the capsule counts down the last seconds.
+pub fn limit(after: Duration) {
+    send(Cmd::Limit(Instant::now() + after));
 }
 
 /// The text landed: a check, then fade out.
@@ -350,7 +363,11 @@ impl Surface {
         unsafe {
             let dc = CreateCompatibleDC(None);
             let mask_dc = CreateCompatibleDC(None);
-            let (Some((bmp, bits)), Some((mask_bmp, mask_bits))) = (dib(dc), dib(mask_dc)) else {
+            let (a, b) = (dib(dc), dib(mask_dc));
+            let (Some((bmp, bits)), Some((mask_bmp, mask_bits))) = (a, b) else {
+                for (bmp, _) in [a, b].into_iter().flatten() {
+                    let _ = DeleteObject(HGDIOBJ(bmp.0));
+                }
                 let _ = DeleteDC(dc);
                 let _ = DeleteDC(mask_dc);
                 return None;
@@ -438,6 +455,8 @@ struct Hud {
     panel_h: Spring,
     scroll: Spring,
     rec_t0: Instant,
+    /// Recording cut-off, while recording.
+    limit: Option<Instant>,
     level: f32,
     history: [f32; BARS],
     history_t: Instant,
@@ -465,6 +484,7 @@ impl Hud {
             panel_h: Spring::at(0.0),
             scroll: Spring::at(0.0),
             rec_t0: now,
+            limit: None,
             level: 0.0,
             history: [0.0; BARS],
             history_t: now,
@@ -501,6 +521,9 @@ impl Hud {
                     self.history = [0.0; BARS];
                     LEVEL.store(0, Ordering::Relaxed);
                 }
+                if mode != Mode::Rec {
+                    self.limit = None;
+                }
                 if mode != self.mode {
                     self.mode = mode;
                     self.mode_t0 = now;
@@ -512,7 +535,13 @@ impl Hud {
                     self.set_words(&finals, &interim);
                 }
             }
+            Cmd::Limit(at) => {
+                if self.mode == Mode::Rec {
+                    self.limit = Some(at);
+                }
+            }
             Cmd::Done => {
+                self.limit = None;
                 if self.shown {
                     self.mode = Mode::Done;
                     self.mode_t0 = now;
@@ -613,8 +642,25 @@ impl Hud {
         (out, lines)
     }
 
+    /// Seconds left (rounded up) once the recording limit is within `COUNTDOWN`, and
+    /// when the countdown appeared.
+    fn countdown(&self, now: Instant) -> Option<(u64, Instant)> {
+        let left = self.limit?.checked_duration_since(now)?;
+        let shown = self.limit? - COUNTDOWN;
+        (self.mode == Mode::Rec && left <= COUNTDOWN)
+            .then(|| (left.as_secs() + u64::from(left.subsec_nanos() > 0), shown))
+    }
+
+    /// Countdown pill: its width and digits.
+    fn pill(&self, surf: &Surface, secs: u64) -> (i32, Vec<u16>) {
+        let digits: Vec<u16> = secs.to_string().encode_utf16().collect();
+        let tw = surf.measure(surf.label_font, &digits);
+        let w = (tw as f32 + 2.0 * PILL_PAD * self.scale).max(PILL_H * self.scale);
+        (w.round() as i32, digits)
+    }
+
     /// Capsule content: (its width, label text, label offset within it).
-    fn cap_content(&self, surf: &Surface) -> (i32, Vec<u16>, i32) {
+    fn cap_content(&self, surf: &Surface, now: Instant) -> (i32, Vec<u16>, i32) {
         let utf16 = |s: &str| -> Vec<u16> { s.encode_utf16().collect() };
         let (off, text) = match &self.mode {
             Mode::Rec => {
@@ -627,7 +673,10 @@ impl Hud {
                 let bars = (self.scale * (BARS as f32 * BAR_W + (BARS - 1) as f32 * BAR_GAP))
                     .round() as i32;
                 let off = self.sc(DOT) + self.sc(PART_GAP) + bars + self.sc(PART_GAP);
-                return (off + tw, timer, off);
+                let pill = self
+                    .countdown(now)
+                    .map_or(0, |(n, _)| self.sc(PART_GAP) + self.pill(surf, n).0);
+                return (off + tw + pill, timer, off);
             }
             Mode::Busy(text) => (
                 self.sc(BUSY_DOTS_W) + self.sc(PART_GAP),
@@ -648,7 +697,7 @@ impl Hud {
             return;
         };
         let (space, surf_w) = (surf.space_w, surf.w);
-        let (content_w, label, label_off) = self.cap_content(surf);
+        let (content_w, label, label_off) = self.cap_content(surf, now);
         let mut moving = false;
 
         self.vis.t = if self.shown { 1.0 } else { 0.0 };
@@ -760,6 +809,11 @@ impl Hud {
         let line_h = self.sc(LINE_H);
         let panel_w = self.sc(PANEL_W);
         let panel_gap = self.sc(PANEL_GAP);
+        let count = self.surf.as_ref().and_then(|sf| {
+            let (left, since) = self.countdown(now)?;
+            let (pw, digits) = self.pill(sf, left);
+            Some((left, since, pw, digits))
+        });
         let Some(surf) = self.surf.as_mut() else {
             return;
         };
@@ -877,12 +931,51 @@ impl Hud {
             let fade_in = (self.scroll.v / line_h as f32).min(1.0);
             let text_top = panel.1 + pad_y as f32 * 0.6;
             let fade_len = line_h as f32 * 1.1;
-            blend_text(px, mask, w, rect_i(panel), |y| {
+            blend_text(px, mask, w, rect_i(panel), INK, |y| {
                 let t = ((y - text_top) / fade_len).clamp(0.0, 1.0);
                 1.0 - fade_in * (1.0 - t * t * (3.0 - 2.0 * t))
             });
         }
-        blend_text(px, mask, w, rect_i(cap), |_| 1.0);
+        blend_text(px, mask, w, rect_i(cap), INK, |_| 1.0);
+
+        // Recording limit countdown: a tinted pill at the capsule's right end.
+        if let Some((left, since, pw, digits)) = count {
+            let colour = if left <= COUNTDOWN_RED { RED } else { AMBER };
+            let a = ease(now.saturating_duration_since(since), CONTENT_IN) * content_a;
+            let ph = PILL_H * s;
+            let rect = ((x0 + content_w - pw) as f32, cy - ph / 2.0, pw as f32, ph);
+            paint(
+                px,
+                w,
+                h,
+                (
+                    rect.0 - 1.0,
+                    rect.1 - 1.0,
+                    rect.0 + rect.2 + 1.0,
+                    rect.1 + ph + 1.0,
+                ),
+                |x, y| {
+                    let d = rounded_rect_sd(x, y, rect, ph / 2.0);
+                    (colour, 0.22 * a * (0.5 - d).clamp(0.0, 1.0))
+                },
+            );
+            let tw = surf.measure(surf.label_font, &digits);
+            // SAFETY: drawing into our own memory DC; the pill area is still black there.
+            unsafe {
+                SelectObject(surf.mask_dc, HGDIOBJ(surf.label_font.0));
+                SetTextColor(surf.mask_dc, grey(a));
+                let _ = TextOutW(
+                    surf.mask_dc,
+                    rect.0 as i32 + (pw - tw) / 2,
+                    cy as i32 - surf.label_h / 2,
+                    &digits,
+                );
+                let _ = GdiFlush();
+            }
+            // SAFETY: as above; GDI is flushed.
+            let mask = unsafe { std::slice::from_raw_parts(surf.mask_bits, (w * h) as usize) };
+            blend_text(px, mask, w, rect_i(rect), colour, |_| 1.0);
+        }
 
         // Capsule glyphs.
         let x0 = x0 as f32;
@@ -1104,8 +1197,8 @@ fn check_sd(x: f32, y: f32, progress: f32) -> f32 {
 
 /// Scales a premultiplied pixel by `k`/256.
 fn scale_px(p: u32, k: u32) -> u32 {
-    let rb = ((p & 0x00FF_00FF) * k >> 8) & 0x00FF_00FF;
-    let ga = (((p >> 8) & 0x00FF_00FF) * k >> 8) & 0x00FF_00FF;
+    let rb = (((p & 0x00FF_00FF) * k) >> 8) & 0x00FF_00FF;
+    let ga = ((((p >> 8) & 0x00FF_00FF) * k) >> 8) & 0x00FF_00FF;
     rb | (ga << 8)
 }
 
@@ -1286,6 +1379,7 @@ fn blend_text(
     mask: &[u32],
     w: i32,
     (x0, y0, x1, y1): (i32, i32, i32, i32),
+    colour: Rgb,
     fade: impl Fn(f32) -> f32,
 ) {
     let h = (px.len() as i32) / w;
@@ -1298,7 +1392,7 @@ fn blend_text(
             let i = (yy * w + xx) as usize;
             let g = (mask[i] >> 8) & 0xFF; // green channel
             if g != 0 {
-                px[i] = over(px[i], INK, g as f32 / 255.0 * f);
+                px[i] = over(px[i], colour, g as f32 / 255.0 * f);
             }
         }
     }

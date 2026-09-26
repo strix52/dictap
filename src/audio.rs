@@ -99,6 +99,8 @@ pub struct WavSpool {
     file: File,
     data_len: u32,
     unpatched: u32,
+    /// Reused little-endian scratch for `write`.
+    buf: Vec<u8>,
 }
 
 impl WavSpool {
@@ -109,14 +111,18 @@ impl WavSpool {
             file,
             data_len: 0,
             unpatched: 0,
+            buf: Vec::new(),
         })
     }
 
     pub fn write(&mut self, samples: &[i16]) -> io::Result<()> {
-        let bytes: Vec<u8> = samples.iter().flat_map(|s| s.to_le_bytes()).collect();
-        self.file.write_all(&bytes)?;
-        self.data_len += bytes.len() as u32;
-        self.unpatched += bytes.len() as u32;
+        self.buf.clear();
+        self.buf
+            .extend(samples.iter().flat_map(|s| s.to_le_bytes()));
+        self.file.write_all(&self.buf)?;
+        let n = self.buf.len() as u32;
+        self.data_len += n;
+        self.unpatched += n;
         if self.unpatched >= RATE * 2 {
             self.patch()?;
         }

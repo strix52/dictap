@@ -8,7 +8,7 @@ use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, Sender, sync_channel};
+use std::sync::mpsc::{RecvTimeoutError, Sender, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -159,36 +159,35 @@ fn run(
     let (tx, rx) = sync_channel::<Vec<f32>>(512);
     let dropped = Arc::new(AtomicU32::new(0));
     let fatal: Arc<Mutex<Option<String>>> = Arc::default();
-    let (d, f) = (dropped.clone(), fatal.clone());
-    let stream = device
-        .build_input_stream::<f32, _, _>(
-            config.into(),
-            move |data: &[f32], _: &cpal::InputCallbackInfo| {
-                let mono = if channels == 1 {
-                    data.to_vec()
-                } else {
-                    data.chunks_exact(channels)
-                        .map(|c| c.iter().sum::<f32>() / channels as f32)
-                        .collect()
-                };
-                if tx.try_send(mono).is_err() {
-                    d.fetch_add(1, Ordering::Relaxed);
-                }
-            },
-            move |e: cpal::Error| match e.kind() {
-                cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged => {
-                    log::debug!("capture: {e}")
-                }
-                _ => {
-                    log::warn!("capture stream error: {e}");
-                    f.lock()
-                        .unwrap_or_else(|e| e.into_inner())
-                        .get_or_insert_with(|| e.to_string());
-                }
-            },
-            Some(Duration::from_secs(3)),
-        )
-        .map_err(|e| format!("Microphone didn't open: {e}"))?;
+    let f = fatal.clone();
+    let on_error = move |e: cpal::Error| match e.kind() {
+        cpal::ErrorKind::Xrun | cpal::ErrorKind::DeviceChanged => log::debug!("capture: {e}"),
+        _ => {
+            log::warn!("capture stream error: {e}");
+            f.lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .get_or_insert_with(|| e.to_string());
+        }
+    };
+    let timeout = Some(Duration::from_secs(3));
+    let format = config.sample_format();
+    let config: cpal::StreamConfig = config.into();
+    // Shared-mode WASAPI almost always hands out f32; some drivers offer only 16-bit.
+    let stream = match format {
+        cpal::SampleFormat::I16 => device.build_input_stream::<i16, _, _>(
+            config,
+            downmix(channels, tx, dropped.clone(), |s| f32::from(s) / 32768.0),
+            on_error,
+            timeout,
+        ),
+        _ => device.build_input_stream::<f32, _, _>(
+            config,
+            downmix(channels, tx, dropped.clone(), |s| s),
+            on_error,
+            timeout,
+        ),
+    }
+    .map_err(|e| format!("Microphone didn't open: {e}"))?;
     stream
         .play()
         .map_err(|e| format!("Microphone didn't start: {e}"))?;
@@ -240,9 +239,14 @@ fn run(
         }
     }
     queue.close();
-    let duration_ms = spool
-        .finish()
-        .map_err(|e| format!("Couldn't finish audio: {e}"))?;
+    let duration_ms = match spool.finish() {
+        Ok(ms) => ms,
+        Err(e) => {
+            // After Opened core waits for a verdict, so always send one.
+            send(CaptureEvent::Failed(format!("Couldn't finish audio: {e}")));
+            return Ok(());
+        }
+    };
     let dropped = dropped.load(Ordering::Relaxed);
     if dropped > 0 {
         log::warn!("capture: {dropped} chunks dropped");
@@ -253,6 +257,24 @@ fn run(
         reason,
     });
     Ok(())
+}
+
+/// The cpal callback: averages channels to mono f32 and hands the chunk over.
+fn downmix<T: Copy + 'static>(
+    channels: usize,
+    tx: SyncSender<Vec<f32>>,
+    dropped: Arc<AtomicU32>,
+    conv: fn(T) -> f32,
+) -> impl FnMut(&[T], &cpal::InputCallbackInfo) + Send + 'static {
+    move |data, _| {
+        let mono = data
+            .chunks_exact(channels)
+            .map(|c| c.iter().map(|&s| conv(s)).sum::<f32>() / channels as f32)
+            .collect();
+        if tx.try_send(mono).is_err() {
+            dropped.fetch_add(1, Ordering::Relaxed);
+        }
+    }
 }
 
 #[cfg(test)]

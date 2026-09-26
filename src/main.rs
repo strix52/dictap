@@ -129,6 +129,10 @@ fn overlay_demo() {
     overlay::show("Starting…", Tone::Busy, None);
     pause(900);
     overlay::show("Listening…", Tone::Recording, None);
+    // Recording limit: the countdown pill, amber then red.
+    overlay::limit(Duration::from_secs(8));
+    speak(8200);
+    overlay::show("Listening…", Tone::Recording, None);
     speak(1500);
     let said = "so the thing I wanted to mention is that the overlay now shows what you are saying while you are still saying it and older lines fade out once there are more than three of them on screen, which keeps the card small and calm even when you ramble on for a good long while";
     let words: Vec<&str> = said.split(' ').collect();
@@ -138,7 +142,7 @@ fn overlay_demo() {
         overlay::words(&finals, &interim);
         speak(if n == 12 { 1500 } else { 170 });
     }
-    overlay::words(&said, "");
+    overlay::words(said, "");
     overlay::level(0.0);
     pause(1200);
     overlay::status("Transcribing…", Tone::Busy, None);

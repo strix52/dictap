@@ -68,7 +68,13 @@ pub fn paste(terminal: bool) -> bool {
     inputs.push(key(LCTRL, true));
     let ok = send(&inputs);
 
-    let restore: Vec<INPUT> = held.iter().map(|&vk| key(vk, false)).collect();
+    // Only re-press what the user is still holding; a key let go meanwhile would otherwise
+    // stay stuck down.
+    let restore: Vec<INPUT> = held
+        .iter()
+        .filter(|&&vk| super::hook::physically_down(vk))
+        .map(|&vk| key(vk, false))
+        .collect();
     if !restore.is_empty() {
         send(&restore);
     }

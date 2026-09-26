@@ -1,11 +1,13 @@
 //! Paste worker: one job at a time, after the history row is committed.
 
 use crate::event::Event;
+use crate::win::overlay::Tone;
 use crate::win::window::Window;
 use crate::win::{clipboard, input, window};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::sleep;
 use std::time::Duration;
+use windows::Win32::Foundation::HWND;
 
 const TERMINAL_CLASSES: &[&str] = &[
     "ConsoleWindowClass",
@@ -36,12 +38,16 @@ pub struct PasteJob {
     pub text: String,
     /// Foreground window when dictation stopped.
     pub target: Option<Window>,
+    /// The text may be cut off (Gemini failed part-way).
+    pub incomplete: bool,
 }
 
 /// Stored in `transcriptions.paste`.
 #[derive(Debug, PartialEq)]
 pub enum Outcome {
     Attempted,
+    /// Not pasted, but left on the clipboard (out of clipboard history).
+    Copied(&'static str),
     Skipped(&'static str),
     Failed(&'static str),
 }
@@ -50,28 +56,37 @@ impl Outcome {
     pub fn db_value(&self) -> String {
         match self {
             Outcome::Attempted => "attempted".into(),
+            Outcome::Copied(r) => format!("copied:{r}"),
             Outcome::Skipped(r) => format!("skipped:{r}"),
             Outcome::Failed(r) => format!("failed:{r}"),
         }
     }
 
-    /// Notice for the overlay when the text didn't go in.
-    pub fn notice(&self) -> Option<&'static str> {
-        match self {
-            Outcome::Attempted => None,
-            Outcome::Skipped("elevated") => {
-                Some("Saved to history — can't paste into an admin window")
+    /// Notice for the overlay unless the text simply went in.
+    pub fn notice(&self, incomplete: bool) -> Option<(&'static str, Tone)> {
+        Some(match self {
+            Outcome::Attempted if incomplete => (
+                "Pasted, but it may be cut off — Retry is in history",
+                Tone::Error,
+            ),
+            Outcome::Attempted => return None,
+            Outcome::Copied("elevated") => {
+                ("Copied — can't paste into an admin window", Tone::Info)
             }
-            Outcome::Skipped(_) => Some("Saved to history — no text box to paste into"),
-            Outcome::Failed("input-blocked") => Some("Couldn't paste — text is on the clipboard"),
-            Outcome::Failed(_) => Some("Couldn't paste — text is in history"),
-        }
+            Outcome::Copied(_) => ("Copied — paste it where you need it", Tone::Info),
+            Outcome::Skipped(_) => ("Saved to history — no text box to paste into", Tone::Error),
+            Outcome::Failed("input-blocked") => {
+                ("Couldn't paste — text is on the clipboard", Tone::Error)
+            }
+            Outcome::Failed(_) => ("Couldn't paste — text is in history", Tone::Error),
+        })
     }
 }
 
 pub struct Pasted {
     pub row_id: i64,
     pub outcome: Outcome,
+    pub incomplete: bool,
 }
 
 /// Starts the paste thread. Results come back as `Event::Pasted`.
@@ -96,7 +111,8 @@ fn run(jobs: Receiver<Job>, events: Sender<Event>) {
         let job = match job {
             Job::Paste(j) => j,
             Job::Copy(text) => {
-                if clipboard::set_text(owner, &text).is_none() {
+                // A deliberate copy: let it into clipboard history like any other.
+                if clipboard::set_text(owner, &text, false).is_none() {
                     log::warn!("copy: clipboard busy");
                 }
                 continue;
@@ -107,36 +123,52 @@ fn run(jobs: Receiver<Job>, events: Sender<Event>) {
         let _ = events.send(Event::Pasted(Pasted {
             row_id: job.row_id,
             outcome,
+            incomplete: job.incomplete,
         }));
     }
 }
 
-fn paste(job: &PasteJob, owner: windows::Win32::Foundation::HWND) -> Outcome {
-    // Prefer the window dictation started from; fall back to whatever is focused now.
-    let restored = job
-        .target
-        .filter(|&t| window::exists(t) && !window::is_own(t))
-        .is_some_and(window::focus);
+/// No text box to paste into: leave the text on the clipboard instead (still private).
+fn copy_instead(owner: HWND, text: &str, why: &'static str) -> Outcome {
+    match clipboard::set_text(owner, text, true) {
+        Some(_) => Outcome::Copied(why),
+        None => Outcome::Skipped(why),
+    }
+}
+
+fn paste(job: &PasteJob, owner: HWND) -> Outcome {
+    // Paste only into the window dictation stopped in. If it's gone or won't come back to
+    // the front, the user has moved on: don't drop the text into whatever is there now.
+    if let Some(t) = job.target {
+        if !window::exists(t) {
+            return copy_instead(owner, &job.text, "window-closed");
+        }
+        let was_front = window::foreground() == Some(t);
+        if !window::focus(t) {
+            log::warn!("paste: couldn't bring the dictation window back");
+            return copy_instead(owner, &job.text, "window-lost");
+        }
+        if !was_front {
+            sleep(Duration::from_millis(20));
+        }
+    }
     let Some(w) = window::foreground() else {
-        return Outcome::Skipped("no-window");
+        return copy_instead(owner, &job.text, "no-window");
     };
     if window::is_own(w) {
-        return Outcome::Skipped("own-window");
+        return copy_instead(owner, &job.text, "own-window");
     }
     if window::is_elevated(w) {
-        return Outcome::Skipped("elevated");
-    }
-    if job.target.is_some() && !restored {
-        log::warn!("paste: couldn't refocus the dictation window; pasting into the current one");
-    }
-    if restored {
-        sleep(Duration::from_millis(20));
+        return copy_instead(owner, &job.text, "elevated");
     }
 
     let Some(saved) = clipboard::save(owner) else {
         return Outcome::Failed("clipboard");
     };
-    let Some(seq) = clipboard::set_text(owner, &job.text) else {
+    if saved.lossy {
+        log::info!("paste: clipboard had formats that won't be restored");
+    }
+    let Some(seq) = clipboard::set_text(owner, &job.text, true) else {
         return Outcome::Failed("clipboard");
     };
 
@@ -151,8 +183,8 @@ fn paste(job: &PasteJob, owner: windows::Win32::Foundation::HWND) -> Outcome {
     }
 
     sleep(RESTORE_DELAY);
-    // Only restore if nobody copied something new meanwhile, and there's something to restore.
-    if clipboard::sequence() == seq && !saved.is_empty() && !clipboard::restore(owner, &saved) {
+    // Put back what was there before (or nothing), unless something new was copied meanwhile.
+    if clipboard::sequence() == seq && !clipboard::restore(owner, &saved) {
         log::warn!("paste: clipboard restore failed");
     }
     Outcome::Attempted

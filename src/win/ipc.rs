@@ -1,5 +1,6 @@
-//! The hook thread: a hidden top-level window (so it receives power and session broadcasts,
-//! which message-only windows don't) plus the keyboard hook, pumping messages until quit.
+//! The IPC thread: a hidden top-level window (so it receives power and session broadcasts,
+//! which message-only windows don't), the tray icon and the app window, pumping messages
+//! until quit. The keyboard hook has its own thread (see `hook`).
 //! A second instance finds the window by class name and asks it to show history.
 
 use crate::event::{Event, PowerEvent, UiCmd};
@@ -63,7 +64,8 @@ pub fn signal_existing(page: super::app::Page) -> bool {
     match unsafe { FindWindowW(CLASS, None) } {
         Ok(hwnd) if !hwnd.is_invalid() => {
             // SAFETY: posting a private message to the other instance's window.
-            unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(page as usize), LPARAM(0)) }.is_ok()
+            unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(page as usize), LPARAM(0)) }
+                .is_ok()
         }
         _ => false,
     }
@@ -102,7 +104,7 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
     if let Err(e) = unsafe { WTSRegisterSessionNotification(hwnd, NOTIFY_FOR_THIS_SESSION) } {
         log::warn!("session notifications unavailable: {e}");
     }
-    super::hook::install(hwnd)?;
+    super::hook::start(hwnd)?;
     super::tray::add(hwnd);
 
     let mut msg = MSG::default();
@@ -116,15 +118,9 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
             DispatchMessageW(&msg);
         }
     }
-    super::hook::uninstall();
+    super::hook::stop();
     IPC.store(0, Ordering::Release);
     Ok(())
-}
-
-fn reinstall_hook(hwnd: HWND) {
-    if let Err(e) = super::hook::install(hwnd) {
-        log::error!("keyboard hook reinstall failed: {e}");
-    }
 }
 
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
@@ -134,7 +130,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_POWERBROADCAST => match wparam.0 as u32 {
             PBT_APMSUSPEND => send(Event::Power(PowerEvent::Suspend)),
             PBT_APMRESUMEAUTOMATIC => {
-                reinstall_hook(hwnd);
+                super::hook::reinstall();
                 send(Event::Power(PowerEvent::Resume));
             }
             _ => {}
@@ -142,7 +138,7 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         WM_WTSSESSION_CHANGE => match wparam.0 as u32 {
             WTS_SESSION_LOCK => send(Event::Power(PowerEvent::Lock)),
             WTS_SESSION_UNLOCK => {
-                reinstall_hook(hwnd);
+                super::hook::reinstall();
                 send(Event::Power(PowerEvent::Unlock));
             }
             _ => {}

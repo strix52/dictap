@@ -11,8 +11,12 @@ use std::sync::{Arc, OnceLock};
 use std::time::Duration;
 
 const URL: &str = "https://generativelanguage.googleapis.com/v1beta/interactions";
-/// ~8 min of 16 kHz mono; the base64 body is ~4/3 of this.
-const MAX_WAV: usize = 15_000_000;
+/// ~20 min of 16 kHz mono. The base64 body is ~4/3 of this, well under the 100 MB
+/// inline request limit; Live's 10-minute cap keeps normal dictations far below it.
+const MAX_WAV: usize = 40_000_000;
+/// Base request timeout, plus one second per `UPLINK` bytes of body (a slow ~1 Mbit/s uplink).
+const TIMEOUT: Duration = Duration::from_secs(60);
+const UPLINK: usize = 125_000;
 
 fn agent() -> &'static ureq::Agent {
     static AGENT: OnceLock<ureq::Agent> = OnceLock::new();
@@ -22,7 +26,6 @@ fn agent() -> &'static ureq::Agent {
             .root_certs(ureq::tls::RootCerts::PlatformVerifier)
             .build();
         ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(90)))
             .http_status_as_error(false)
             .tls_config(tls)
             .build()
@@ -57,8 +60,12 @@ pub fn transcribe(
         ));
     }
     let body = protocol::batch_body(wav, language, words);
+    let timeout = TIMEOUT + Duration::from_secs((body.len() / UPLINK) as u64);
     let mut resp = agent()
         .post(URL)
+        .config()
+        .timeout_global(Some(timeout))
+        .build()
         .header("x-goog-api-key", key)
         .header("content-type", "application/json")
         .send(body.as_bytes())
