@@ -180,7 +180,7 @@ impl Core {
                 match p.outcome.notice() {
                     // Keep the words on screen so the user can see what didn't land.
                     Some(n) => overlay::status(n, Tone::Error, Some(NOTICE)),
-                    None => overlay::hide(),
+                    None => overlay::done(),
                 }
             }
             Event::Quit => {

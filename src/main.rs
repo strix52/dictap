@@ -116,22 +116,41 @@ fn main() {
 fn overlay_demo() {
     // SAFETY: process-wide setting made before any window exists.
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
-    let pause = |s| std::thread::sleep(Duration::from_millis(s));
+    let pause = |ms| std::thread::sleep(Duration::from_millis(ms));
+    // A fake voice: syllable-ish bursts.
+    let speak = |ms: u64| {
+        let t0 = std::time::Instant::now();
+        while t0.elapsed().as_millis() < u128::from(ms) {
+            let t = t0.elapsed().as_secs_f32();
+            let env = ((t * 7.0).sin() * (t * 2.3).sin()).abs();
+            overlay::level(0.01 + 0.25 * env);
+            pause(20);
+        }
+    };
+    overlay::show("Starting…", Tone::Busy, None);
+    pause(900);
     overlay::show("Listening…", Tone::Recording, None);
-    pause(2500);
-    let said = "so the thing I wanted to mention is that the overlay now shows what you are saying while you are still saying it and older lines fade out once there are more than four of them on screen, which keeps the card small and calm even when you ramble on for a good long while about nothing in particular";
+    speak(1500);
+    let said = "so the thing I wanted to mention is that the overlay now shows what you are saying while you are still saying it and older lines fade out once there are more than three of them on screen, which keeps the card small and calm even when you ramble on for a good long while";
     let words: Vec<&str> = said.split(' ').collect();
     for n in 1..=words.len() {
         let finals = words[..n.saturating_sub(3)].join(" ");
         let interim = words[n.saturating_sub(3)..n].join(" ");
         overlay::words(&finals, &interim);
-        pause(if n == 12 { 2500 } else { 180 });
+        speak(if n == 12 { 1500 } else { 170 });
     }
-    pause(2500);
+    overlay::words(&said, "");
+    overlay::level(0.0);
+    pause(1200);
     overlay::status("Transcribing…", Tone::Busy, None);
-    pause(2500);
-    overlay::status("Couldn't paste — copied to clipboard", Tone::Error, Some(Duration::from_secs(3)));
-    pause(3500);
+    pause(1500);
+    overlay::done();
+    pause(1600);
+    overlay::show("Listening…", Tone::Recording, None);
+    overlay::words("hello there", "");
+    pause(800);
+    overlay::status("Couldn't paste — copied to clipboard", Tone::Error, Some(Duration::from_secs(2)));
+    pause(2800);
     overlay::show("Nothing heard", Tone::Info, Some(Duration::from_secs(2)));
-    pause(2500);
+    pause(2800);
 }

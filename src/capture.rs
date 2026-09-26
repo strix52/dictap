@@ -208,6 +208,7 @@ fn run(
             .write(&out)
             .map_err(|e| format!("Couldn't write audio: {e}"))?;
         queue.push(&out);
+        crate::win::overlay::level(crate::gemini::protocol::rms(&out));
         Ok(())
     };
 
