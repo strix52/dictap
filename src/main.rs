@@ -148,7 +148,7 @@ fn overlay_demo() {
     speak(8200);
     overlay::show("Listening…", Tone::Recording, None);
     speak(1500);
-    let said = "so the thing I wanted to mention is that the overlay now shows what you are saying while you are still saying it and older lines fade out once there are more than three of them on screen, which keeps the card small and calm even when you ramble on for a good long while";
+    let said = "Hey Sam, quick update on the launch. The build is green, I pushed the fix for the login bug this morning, and the release notes are drafted, so we should be good to ship on Friday once QA signs off. Let me know if you want to walk through it before then.";
     let words: Vec<&str> = said.split(' ').collect();
     for n in 1..=words.len() {
         let finals = words[..n.saturating_sub(3)].join(" ");

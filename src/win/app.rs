@@ -152,10 +152,13 @@ impl Page {
 
     /// `--dictionary` or `--settings` on the command line; history otherwise.
     pub fn from_args() -> Page {
-        match std::env::args().nth(1).as_deref() {
-            Some("--dictionary") => Page::Dictionary,
-            Some("--settings") => Page::Settings,
-            _ => Page::History,
+        let has = |a: &str| std::env::args().skip(1).any(|x| x == a);
+        if has("--dictionary") {
+            Page::Dictionary
+        } else if has("--settings") {
+            Page::Settings
+        } else {
+            Page::History
         }
     }
 }
