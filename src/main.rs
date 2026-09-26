@@ -6,6 +6,7 @@ mod event;
 mod gemini;
 mod hotkey;
 mod import;
+mod key;
 mod logger;
 mod paste;
 mod settings;
@@ -92,7 +93,11 @@ fn main() {
                     active = None;
                     overlay::show(&e, Tone::Error, Some(Duration::from_secs(3)));
                 }
-                event::CaptureEvent::Ended { duration_ms, dropped, reason } => {
+                event::CaptureEvent::Ended {
+                    duration_ms,
+                    dropped,
+                    reason,
+                } => {
                     active = None;
                     log::info!("recorded {duration_ms} ms, {dropped} dropped, reason {reason:?}");
                     let msg = format!("Recorded {:.1} s", duration_ms as f64 / 1000.0);
