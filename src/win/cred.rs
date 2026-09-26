@@ -2,7 +2,8 @@
 
 use windows::Win32::Foundation::{ERROR_NOT_FOUND, WIN32_ERROR};
 use windows::Win32::Security::Credentials::{
-    CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree, CredReadW, CredWriteW,
+    CRED_FLAGS, CRED_PERSIST_LOCAL_MACHINE, CRED_TYPE_GENERIC, CREDENTIALW, CredDeleteW, CredFree,
+    CredReadW, CredWriteW,
 };
 use windows::core::{HSTRING, PWSTR};
 
@@ -66,7 +67,10 @@ mod tests {
     fn roundtrip() {
         let target = format!("gemdict/test-{}", std::process::id());
         super::write(&target, "test", b"s3cret").unwrap();
-        assert_eq!(super::read(&target).unwrap().as_deref(), Some(&b"s3cret"[..]));
+        assert_eq!(
+            super::read(&target).unwrap().as_deref(),
+            Some(&b"s3cret"[..])
+        );
         super::delete(&target).unwrap();
         assert_eq!(super::read(&target).unwrap(), None);
         super::delete(&target).unwrap();

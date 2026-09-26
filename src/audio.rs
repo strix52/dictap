@@ -23,7 +23,11 @@ impl Resampler {
         if in_rate == 48_000 {
             Resampler::Third { acc: 0.0, n: 0 }
         } else {
-            Resampler::Linear { in_rate: u64::from(in_rate), pos: u64::from(RATE), prev: 0.0 }
+            Resampler::Linear {
+                in_rate: u64::from(in_rate),
+                pos: u64::from(RATE),
+                prev: 0.0,
+            }
         }
     }
 
@@ -101,7 +105,11 @@ impl WavSpool {
     pub fn create(path: &Path) -> io::Result<WavSpool> {
         let mut file = File::create(path)?;
         file.write_all(&header(0))?;
-        Ok(WavSpool { file, data_len: 0, unpatched: 0 })
+        Ok(WavSpool {
+            file,
+            data_len: 0,
+            unpatched: 0,
+        })
     }
 
     pub fn write(&mut self, samples: &[i16]) -> io::Result<()> {
@@ -140,7 +148,10 @@ pub fn repair(path: &Path) -> io::Result<u64> {
     let mut file = OpenOptions::new().read(true).write(true).open(path)?;
     let len = file.metadata()?.len();
     if len < u64::from(HEADER_LEN) {
-        return Err(io::Error::new(io::ErrorKind::InvalidData, "spool file too short"));
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidData,
+            "spool file too short",
+        ));
     }
     let data_len = ((len - u64::from(HEADER_LEN)).min(u64::from(u32::MAX - 36)) & !1) as u32;
     file.write_all(&header(data_len))?;
@@ -183,9 +194,17 @@ mod tests {
             let input = sine(rate, 1000.0, 1.0);
             let whole = resample_chunked(rate, &input, input.len());
             // The one-sample delay drops at most 16000/rate samples at the end.
-            assert!((whole.len() as i64 - 16_000).abs() <= 2, "{rate}: {}", whole.len());
+            assert!(
+                (whole.len() as i64 - 16_000).abs() <= 2,
+                "{rate}: {}",
+                whole.len()
+            );
             for chunk in [1, 7, 480, 441] {
-                assert_eq!(resample_chunked(rate, &input, chunk), whole, "{rate}/{chunk}");
+                assert_eq!(
+                    resample_chunked(rate, &input, chunk),
+                    whole,
+                    "{rate}/{chunk}"
+                );
             }
         }
     }
@@ -208,12 +227,21 @@ mod tests {
         w.write(&vec![100i16; 16_000]).unwrap(); // 1 s: triggers a patch
         w.write(&vec![100i16; 8_000]).unwrap(); // 0.5 s more: no patch yet
         let bytes = read_wav(&path).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 32_000);
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            32_000
+        );
         assert_eq!(w.finish().unwrap(), 1500);
         let bytes = read_wav(&path).unwrap();
         assert_eq!(bytes.len(), 44 + 48_000);
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 48_000);
-        assert_eq!(u32::from_le_bytes(bytes[4..8].try_into().unwrap()), 36 + 48_000);
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            48_000
+        );
+        assert_eq!(
+            u32::from_le_bytes(bytes[4..8].try_into().unwrap()),
+            36 + 48_000
+        );
 
         // Simulate a crash: stale header, extra data appended.
         let mut f = OpenOptions::new().append(true).open(&path).unwrap();
@@ -221,7 +249,10 @@ mod tests {
         drop(f);
         assert_eq!(repair(&path).unwrap(), 1600);
         let bytes = read_wav(&path).unwrap();
-        assert_eq!(u32::from_le_bytes(bytes[40..44].try_into().unwrap()), 51_200);
+        assert_eq!(
+            u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
+            51_200
+        );
         std::fs::remove_dir_all(&dir).ok();
     }
 }

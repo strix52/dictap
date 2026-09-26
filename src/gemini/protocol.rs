@@ -89,12 +89,20 @@ pub struct ServerMsg {
 pub fn parse_server(text: &str) -> Option<ServerMsg> {
     let v: Value = serde_json::from_str(text).ok()?;
     let sc = &v["serverContent"];
-    let text_at = |v: &Value| v["text"].as_str().map(str::trim).filter(|s| !s.is_empty()).map(String::from);
+    let text_at = |v: &Value| {
+        v["text"]
+            .as_str()
+            .map(str::trim)
+            .filter(|s| !s.is_empty())
+            .map(String::from)
+    };
     Some(ServerMsg {
         setup_complete: v.get("setupComplete").is_some(),
         interim: text_at(&sc["interimInputTranscription"]),
         final_text: text_at(&sc["inputTranscription"]),
-        generation_complete: sc.get("generationComplete").is_some_and(|g| g.as_bool() != Some(false)),
+        generation_complete: sc
+            .get("generationComplete")
+            .is_some_and(|g| g.as_bool() != Some(false)),
     })
 }
 
@@ -144,7 +152,10 @@ pub fn rms(samples: &[i16]) -> f32 {
     if samples.is_empty() {
         return 0.0;
     }
-    let sum: f64 = samples.iter().map(|&s| (f64::from(s) / 32768.0).powi(2)).sum();
+    let sum: f64 = samples
+        .iter()
+        .map(|&s| (f64::from(s) / 32768.0).powi(2))
+        .sum();
     (sum / samples.len() as f64).sqrt() as f32
 }
 
@@ -168,7 +179,8 @@ mod tests {
     fn audio_and_batch_shapes() {
         let v: Value = serde_json::from_str(&live_audio(&[1, -1])).unwrap();
         assert_eq!(v["realtimeInput"]["audio"]["data"], "AQD//w==");
-        let v: Value = serde_json::from_str(&batch_body(b"RIFF", Some("en-GB"), &["Orca".into()])).unwrap();
+        let v: Value =
+            serde_json::from_str(&batch_body(b"RIFF", Some("en-GB"), &["Orca".into()])).unwrap();
         assert_eq!(v["input"][0]["mime_type"], "audio/wav");
         let tc = &v["generation_config"]["transcription_config"];
         assert_eq!(tc["custom_vocabulary"], json!(["Orca"]));
@@ -178,8 +190,14 @@ mod tests {
     #[test]
     fn batch_text_variants() {
         assert_eq!(batch_text(&json!({"output_text": " hi "})), Ok("hi".into()));
-        assert_eq!(batch_text(&json!({"status": "completed", "output_text": "a"})), Ok("a".into()));
-        assert_eq!(batch_text(&json!({"status": "failed"})), Err("failed".into()));
+        assert_eq!(
+            batch_text(&json!({"status": "completed", "output_text": "a"})),
+            Ok("a".into())
+        );
+        assert_eq!(
+            batch_text(&json!({"status": "failed"})),
+            Err("failed".into())
+        );
         let steps = json!({"steps": [{"content": [{"text": "Hello "}, {"text": "there"}]}, {"content": []}]});
         assert_eq!(batch_text(&steps), Ok("Hello there".into()));
         assert_eq!(batch_text(&json!({})), Ok(String::new()));
@@ -193,8 +211,15 @@ mod tests {
         .unwrap();
         assert_eq!(m.final_text.as_deref(), Some("Hello world."));
         assert!(m.generation_complete);
-        assert!(parse_server(r#"{"setupComplete":{}}"#).unwrap().setup_complete);
-        assert_eq!(parse_server(r#"{"serverContent":{"speechState":"x"}}"#).unwrap(), ServerMsg::default());
+        assert!(
+            parse_server(r#"{"setupComplete":{}}"#)
+                .unwrap()
+                .setup_complete
+        );
+        assert_eq!(
+            parse_server(r#"{"serverContent":{"speechState":"x"}}"#).unwrap(),
+            ServerMsg::default()
+        );
         assert!(parse_server("not json").is_none());
     }
 
@@ -202,7 +227,9 @@ mod tests {
     fn transcript_turns() {
         let mut t = Transcript::default();
         let msg = |s: &str| parse_server(s).unwrap();
-        t.apply(&msg(r#"{"serverContent":{"interimInputTranscription":{"text":"the quick"}}}"#));
+        t.apply(&msg(
+            r#"{"serverContent":{"interimInputTranscription":{"text":"the quick"}}}"#,
+        ));
         assert!(t.turn_open);
         assert_eq!(t.result(), ("the quick".into(), true));
         t.apply(&msg(
@@ -214,7 +241,9 @@ mod tests {
         assert!(!t.turn_open, "silence keeps the turn closed");
         t.sent_audio(&[3000, -3000].repeat(800));
         assert!(t.turn_open, "speech reopens it");
-        t.apply(&msg(r#"{"serverContent":{"inputTranscription":{"text":"Jumps."}}}"#));
+        t.apply(&msg(
+            r#"{"serverContent":{"inputTranscription":{"text":"Jumps."}}}"#,
+        ));
         t.apply(&msg(r#"{"serverContent":{"generationComplete":true}}"#));
         assert_eq!(t.result(), ("The quick fox. Jumps.".into(), false));
     }

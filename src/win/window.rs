@@ -2,16 +2,16 @@
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL, TOKEN_QUERY,
-    TokenIntegrityLevel,
+    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
+    TOKEN_QUERY, TokenIntegrityLevel,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
     PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetClassNameW, GetForegroundWindow, HWND_MESSAGE, WINDOW_EX_STYLE, WINDOW_STYLE, GetWindowThreadProcessId, IsIconic, IsWindow, SW_RESTORE,
-    SetForegroundWindow, ShowWindow,
+    CreateWindowExW, GetClassNameW, GetForegroundWindow, GetWindowThreadProcessId, HWND_MESSAGE,
+    IsIconic, IsWindow, SW_RESTORE, SetForegroundWindow, ShowWindow, WINDOW_EX_STYLE, WINDOW_STYLE,
 };
 use windows::core::{PWSTR, w};
 
@@ -69,7 +69,15 @@ pub fn exe_name(w: Window) -> Option<String> {
         let mut buf = [0u16; 1024];
         let mut len = buf.len() as u32;
         // SAFETY: buffer and length are valid.
-        unsafe { QueryFullProcessImageNameW(process, PROCESS_NAME_WIN32, PWSTR(buf.as_mut_ptr()), &mut len) }.ok()?;
+        unsafe {
+            QueryFullProcessImageNameW(
+                process,
+                PROCESS_NAME_WIN32,
+                PWSTR(buf.as_mut_ptr()),
+                &mut len,
+            )
+        }
+        .ok()?;
         let path = String::from_utf16_lossy(&buf[..len as usize]);
         Some(path.rsplit('\\').next().unwrap_or(&path).to_lowercase())
     })
@@ -83,7 +91,13 @@ fn integrity_of(process: HANDLE) -> Option<u32> {
     let mut len = 0;
     // SAFETY: buffer is valid; on success it holds a TOKEN_MANDATORY_LABEL whose SID points inside it.
     let level = unsafe {
-        let ok = GetTokenInformation(token, TokenIntegrityLevel, Some(buf.as_mut_ptr().cast()), buf.len() as u32, &mut len);
+        let ok = GetTokenInformation(
+            token,
+            TokenIntegrityLevel,
+            Some(buf.as_mut_ptr().cast()),
+            buf.len() as u32,
+            &mut len,
+        );
         let _ = CloseHandle(token);
         ok.ok()?;
         let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
@@ -120,8 +134,13 @@ pub fn focus(w: Window) -> bool {
         let me = GetCurrentThreadId();
         let target_tid = pid_and_thread(w).1;
         let fg_tid = foreground().map_or(0, |f| pid_and_thread(f).1);
-        let attached_target = target_tid != 0 && target_tid != me && AttachThreadInput(me, target_tid, true).as_bool();
-        let attached_fg = fg_tid != 0 && fg_tid != me && fg_tid != target_tid && AttachThreadInput(me, fg_tid, true).as_bool();
+        let attached_target = target_tid != 0
+            && target_tid != me
+            && AttachThreadInput(me, target_tid, true).as_bool();
+        let attached_fg = fg_tid != 0
+            && fg_tid != me
+            && fg_tid != target_tid
+            && AttachThreadInput(me, fg_tid, true).as_bool();
         let _ = SetForegroundWindow(w.hwnd());
         if attached_fg {
             let _ = AttachThreadInput(me, fg_tid, false);

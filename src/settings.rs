@@ -17,7 +17,11 @@ pub struct Settings {
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { hotkey: Chord::DEFAULT.to_string(), language: "en-GB".into(), sounds: true }
+        Settings {
+            hotkey: Chord::DEFAULT.to_string(),
+            language: "en-GB".into(),
+            sounds: true,
+        }
     }
 }
 
@@ -41,7 +45,10 @@ impl Settings {
     /// Writes via a temp file and rename so a crash can't leave half a file.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(self).expect("settings serialize"))?;
+        std::fs::write(
+            &tmp,
+            serde_json::to_string_pretty(self).expect("settings serialize"),
+        )?;
         std::fs::rename(tmp, path)
     }
 
@@ -65,7 +72,11 @@ mod tests {
         let path = dir.join("settings.json");
         assert_eq!(Settings::load(&path), Settings::default());
 
-        let s = Settings { hotkey: "Ctrl+Shift+Space".into(), language: String::new(), sounds: false };
+        let s = Settings {
+            hotkey: "Ctrl+Shift+Space".into(),
+            language: String::new(),
+            sounds: false,
+        };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);
         assert_eq!(Settings::load(&path).language(), None);

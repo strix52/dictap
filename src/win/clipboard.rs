@@ -4,10 +4,12 @@ use std::thread::sleep;
 use std::time::Duration;
 use windows::Win32::Foundation::{GlobalFree, HANDLE, HGLOBAL, HWND};
 use windows::Win32::System::DataExchange::{
-    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData, GetClipboardSequenceNumber,
-    OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
+    CloseClipboard, EmptyClipboard, EnumClipboardFormats, GetClipboardData,
+    GetClipboardSequenceNumber, OpenClipboard, RegisterClipboardFormatW, SetClipboardData,
 };
-use windows::Win32::System::Memory::{GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock};
+use windows::Win32::System::Memory::{
+    GMEM_MOVEABLE, GlobalAlloc, GlobalLock, GlobalSize, GlobalUnlock,
+};
 use windows::core::w;
 
 const CF_TEXT: u32 = 1;
@@ -98,7 +100,10 @@ fn write_global(format: u32, bytes: &[u8]) -> bool {
 pub fn save(owner: HWND) -> Option<Saved> {
     let _open = Open::new(owner)?;
     let wanted = saved_formats();
-    let mut saved = Saved { items: Vec::new(), lossy: false };
+    let mut saved = Saved {
+        items: Vec::new(),
+        lossy: false,
+    };
     let mut format = 0;
     loop {
         // SAFETY: clipboard is open.
@@ -123,7 +128,11 @@ pub fn set_text(owner: HWND, text: &str) -> Option<u32> {
     let _open = Open::new(owner)?;
     // SAFETY: clipboard is open with an owner window.
     unsafe { EmptyClipboard() }.ok()?;
-    let wide: Vec<u8> = text.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+    let wide: Vec<u8> = text
+        .encode_utf16()
+        .chain([0])
+        .flat_map(u16::to_le_bytes)
+        .collect();
     if !write_global(CF_UNICODETEXT, &wide) {
         return None;
     }
@@ -150,7 +159,10 @@ pub fn restore(owner: HWND, saved: &Saved) -> bool {
     if unsafe { EmptyClipboard() }.is_err() {
         return false;
     }
-    saved.items.iter().all(|(format, bytes)| write_global(*format, bytes))
+    saved
+        .items
+        .iter()
+        .all(|(format, bytes)| write_global(*format, bytes))
 }
 
 impl Saved {

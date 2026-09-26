@@ -6,18 +6,20 @@ use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, SIZE, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateSolidBrush, DT_LEFT, DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER,
-    DeleteObject, DrawTextW, Ellipse, EndPaint, FW_SEMIBOLD, FillRect, GetMonitorInfoW, GetTextExtentPoint32W, HDC,
-    HFONT, InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT, SelectObject,
-    SetBkMode, SetTextColor, TRANSPARENT, HGDIOBJ, CreateRoundRectRgn, SetWindowRgn, GetDC, ReleaseDC,
+    BeginPaint, CLEARTYPE_QUALITY, CreateFontW, CreateRoundRectRgn, CreateSolidBrush, DT_LEFT,
+    DT_NOPREFIX, DT_SINGLELINE, DT_VCENTER, DeleteObject, DrawTextW, Ellipse, EndPaint,
+    FW_SEMIBOLD, FillRect, GetDC, GetMonitorInfoW, GetTextExtentPoint32W, HDC, HFONT, HGDIOBJ,
+    InvalidateRect, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint, PAINTSTRUCT,
+    ReleaseDC, SelectObject, SetBkMode, SetTextColor, SetWindowRgn, TRANSPARENT,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
 use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, HWND_TOPMOST, KillTimer, LWA_ALPHA,
-    MSG, PostMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE, SWP_SHOWWINDOW, SetLayeredWindowAttributes,
-    SetTimer, SetWindowPos, ShowWindow, WM_APP, WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE,
-    WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
+    CreateWindowExW, DefWindowProcW, DispatchMessageW, GetCursorPos, GetMessageW, HWND_TOPMOST,
+    KillTimer, LWA_ALPHA, MSG, PostMessageW, RegisterClassW, SW_HIDE, SWP_NOACTIVATE,
+    SWP_SHOWWINDOW, SetLayeredWindowAttributes, SetTimer, SetWindowPos, ShowWindow, WM_APP,
+    WM_PAINT, WM_TIMER, WNDCLASSW, WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW,
+    WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::w;
 
@@ -74,7 +76,14 @@ fn post(hide_ms: usize) {
     let hwnd = HWND_VAL.load(Ordering::Acquire);
     if hwnd != 0 {
         // SAFETY: posting to our overlay window.
-        let _ = unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), WM_APP_UPDATE, WPARAM(hide_ms), LPARAM(0)) };
+        let _ = unsafe {
+            PostMessageW(
+                Some(HWND(hwnd as *mut _)),
+                WM_APP_UPDATE,
+                WPARAM(hide_ms),
+                LPARAM(0),
+            )
+        };
     }
 }
 
@@ -86,10 +95,29 @@ fn run(ready: std::sync::mpsc::Sender<()>) {
             return;
         };
         let class = w!("gemdict.overlay");
-        let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinstance.into(), lpszClassName: class, ..Default::default() };
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinstance.into(),
+            lpszClassName: class,
+            ..Default::default()
+        };
         RegisterClassW(&wc);
-        let ex = WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
-        match CreateWindowExW(ex, class, w!("gemdict"), WS_POPUP, 0, 0, 0, 0, None, None, Some(hinstance.into()), None) {
+        let ex =
+            WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE;
+        match CreateWindowExW(
+            ex,
+            class,
+            w!("gemdict"),
+            WS_POPUP,
+            0,
+            0,
+            0,
+            0,
+            None,
+            None,
+            Some(hinstance.into()),
+            None,
+        ) {
             Ok(hwnd) => {
                 let _ = SetLayeredWindowAttributes(hwnd, COLORREF(0), 235, LWA_ALPHA);
                 HWND_VAL.store(hwnd.0 as isize, Ordering::Release);
@@ -108,8 +136,22 @@ fn font(dpi: u32) -> HFONT {
     let px = -(15 * dpi as i32 / 96);
     // SAFETY: creates a GDI font the caller deletes.
     unsafe {
-        CreateFontW(px, 0, 0, 0, FW_SEMIBOLD.0 as i32, 0, 0, 0, Default::default(), Default::default(),
-            Default::default(), CLEARTYPE_QUALITY, 0, w!("Segoe UI"))
+        CreateFontW(
+            px,
+            0,
+            0,
+            0,
+            FW_SEMIBOLD.0 as i32,
+            0,
+            0,
+            0,
+            Default::default(),
+            Default::default(),
+            Default::default(),
+            CLEARTYPE_QUALITY,
+            0,
+            w!("Segoe UI"),
+        )
     }
 }
 
@@ -135,7 +177,10 @@ fn update(hwnd: HWND, hide_ms: usize) {
         let mut cursor = POINT::default();
         let _ = GetCursorPos(&mut cursor);
         let monitor = MonitorFromPoint(cursor, MONITOR_DEFAULTTONEAREST);
-        let mut info = MONITORINFO { cbSize: size_of::<MONITORINFO>() as u32, ..Default::default() };
+        let mut info = MONITORINFO {
+            cbSize: size_of::<MONITORINFO>() as u32,
+            ..Default::default()
+        };
         let _ = GetMonitorInfoW(monitor, &mut info);
         let dpi = GetDpiForWindow(hwnd).max(96);
 
@@ -153,7 +198,15 @@ fn update(hwnd: HWND, hide_ms: usize) {
         let y = work.bottom - h - 48 * dpi as i32 / 96;
         let rgn = CreateRoundRectRgn(0, 0, w + 1, h + 1, h, h);
         SetWindowRgn(hwnd, Some(rgn), false);
-        let _ = SetWindowPos(hwnd, Some(HWND_TOPMOST), x, y, w, h, SWP_NOACTIVATE | SWP_SHOWWINDOW);
+        let _ = SetWindowPos(
+            hwnd,
+            Some(HWND_TOPMOST),
+            x,
+            y,
+            w,
+            h,
+            SWP_NOACTIVATE | SWP_SHOWWINDOW,
+        );
         let _ = InvalidateRect(Some(hwnd), None, true);
         if hide_ms > 0 {
             SetTimer(Some(hwnd), HIDE_TIMER, hide_ms as u32, None);
@@ -174,7 +227,16 @@ fn paint(hwnd: HWND) {
         let (w, h, pad, dot) = layout(hdc, &wide, dpi);
 
         let bg = CreateSolidBrush(rgb(32, 33, 36));
-        FillRect(hdc, &RECT { left: 0, top: 0, right: w, bottom: h }, bg);
+        FillRect(
+            hdc,
+            &RECT {
+                left: 0,
+                top: 0,
+                right: w,
+                bottom: h,
+            },
+            bg,
+        );
         let dot_brush = CreateSolidBrush(tone.dot());
         let old_brush = SelectObject(hdc, HGDIOBJ(dot_brush.0));
         let top = (h - dot) / 2;
@@ -183,9 +245,19 @@ fn paint(hwnd: HWND) {
 
         SetBkMode(hdc, TRANSPARENT);
         SetTextColor(hdc, rgb(240, 240, 240));
-        let mut rect = RECT { left: pad + dot + 8 * dpi as i32 / 96, top: 0, right: w, bottom: h };
+        let mut rect = RECT {
+            left: pad + dot + 8 * dpi as i32 / 96,
+            top: 0,
+            right: w,
+            bottom: h,
+        };
         let mut buf = wide.clone();
-        DrawTextW(hdc, &mut buf, &mut rect, DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX);
+        DrawTextW(
+            hdc,
+            &mut buf,
+            &mut rect,
+            DT_LEFT | DT_VCENTER | DT_SINGLELINE | DT_NOPREFIX,
+        );
 
         SelectObject(hdc, old);
         let _ = DeleteObject(HGDIOBJ(f.0));

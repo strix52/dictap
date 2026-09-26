@@ -16,14 +16,20 @@ pub struct Chord {
 }
 
 impl Chord {
-    pub const DEFAULT: Chord = Chord { mods: CTRL | WIN, key: 0 };
+    pub const DEFAULT: Chord = Chord {
+        mods: CTRL | WIN,
+        key: 0,
+    };
 
     pub fn pack(self) -> u64 {
         u64::from(self.mods) | (u64::from(self.key) << 8)
     }
 
     pub fn unpack(v: u64) -> Chord {
-        Chord { mods: (v & 0xff) as u8, key: ((v >> 8) & 0xffff) as u16 }
+        Chord {
+            mods: (v & 0xff) as u8,
+            key: ((v >> 8) & 0xffff) as u16,
+        }
     }
 
     /// Parses "Ctrl+Win", "Ctrl+Shift+Space", "Alt+F9". Needs at least one modifier.
@@ -64,13 +70,26 @@ impl fmt::Display for Chord {
 }
 
 const NAMED_KEYS: &[(&str, u16)] = &[
-    ("Space", 0x20), ("Enter", 0x0D), ("Tab", 0x09), ("Esc", 0x1B), ("Backspace", 0x08),
-    ("Insert", 0x2D), ("Delete", 0x2E), ("Home", 0x24), ("End", 0x23), ("PageUp", 0x21),
-    ("PageDown", 0x22), ("Pause", 0x13), ("`", 0xC0),
+    ("Space", 0x20),
+    ("Enter", 0x0D),
+    ("Tab", 0x09),
+    ("Esc", 0x1B),
+    ("Backspace", 0x08),
+    ("Insert", 0x2D),
+    ("Delete", 0x2E),
+    ("Home", 0x24),
+    ("End", 0x23),
+    ("PageUp", 0x21),
+    ("PageDown", 0x22),
+    ("Pause", 0x13),
+    ("`", 0xC0),
 ];
 
 fn key_vk(name: &str) -> Option<u16> {
-    if let Some(&(_, vk)) = NAMED_KEYS.iter().find(|(n, _)| n.eq_ignore_ascii_case(name)) {
+    if let Some(&(_, vk)) = NAMED_KEYS
+        .iter()
+        .find(|(n, _)| n.eq_ignore_ascii_case(name))
+    {
         return Some(vk);
     }
     let upper = name.to_ascii_uppercase();
@@ -107,8 +126,12 @@ pub fn mod_bit(vk: u16) -> u8 {
 }
 
 /// Left/right VK pairs per modifier bit, for `GetAsyncKeyState` resync.
-pub const MOD_KEYS: [(u8, u16, u16); 4] =
-    [(CTRL, 0xA2, 0xA3), (ALT, 0xA4, 0xA5), (SHIFT, 0xA0, 0xA1), (WIN, 0x5B, 0x5C)];
+pub const MOD_KEYS: [(u8, u16, u16); 4] = [
+    (CTRL, 0xA2, 0xA3),
+    (ALT, 0xA4, 0xA5),
+    (SHIFT, 0xA0, 0xA1),
+    (WIN, 0x5B, 0x5C),
+];
 
 /// Modifier set after this event. The event's own key comes from the event; every other
 /// modifier key is resynced from `is_down` (GetAsyncKeyState), so a key-up the hook missed
@@ -232,41 +255,97 @@ mod tests {
 
     #[test]
     fn clean_chord_fires_once_on_release() {
-        assert_eq!(run(CW, &[(LCTRL, true), (LWIN, true), (LWIN, false), (LCTRL, false)]), (1, 1));
-        assert_eq!(run(CW, &[(LWIN, true), (LCTRL, true), (LCTRL, false), (LWIN, false)]), (1, 1));
+        assert_eq!(
+            run(
+                CW,
+                &[(LCTRL, true), (LWIN, true), (LWIN, false), (LCTRL, false)]
+            ),
+            (1, 1)
+        );
+        assert_eq!(
+            run(
+                CW,
+                &[(LWIN, true), (LCTRL, true), (LCTRL, false), (LWIN, false)]
+            ),
+            (1, 1)
+        );
     }
 
     #[test]
     fn autorepeat_does_not_matter() {
-        let ev = [(LCTRL, true), (LWIN, true), (LWIN, true), (LWIN, true), (LCTRL, true), (LCTRL, false), (LWIN, false)];
+        let ev = [
+            (LCTRL, true),
+            (LWIN, true),
+            (LWIN, true),
+            (LWIN, true),
+            (LCTRL, true),
+            (LCTRL, false),
+            (LWIN, false),
+        ];
         assert_eq!(run(CW, &ev).0, 1);
     }
 
     #[test]
     fn right_ctrl_counts() {
-        assert_eq!(run(CW, &[(RCTRL, true), (LWIN, true), (RCTRL, false), (LWIN, false)]).0, 1);
+        assert_eq!(
+            run(
+                CW,
+                &[(RCTRL, true), (LWIN, true), (RCTRL, false), (LWIN, false)]
+            )
+            .0,
+            1
+        );
     }
 
     #[test]
     fn other_key_makes_it_dirty() {
         // Ctrl+Win+Right switches virtual desktop; must not toggle.
-        let ev = [(LCTRL, true), (LWIN, true), (RIGHT, true), (RIGHT, false), (LWIN, false), (LCTRL, false)];
+        let ev = [
+            (LCTRL, true),
+            (LWIN, true),
+            (RIGHT, true),
+            (RIGHT, false),
+            (LWIN, false),
+            (LCTRL, false),
+        ];
         assert_eq!(run(CW, &ev), (0, 0));
-        let ev = [(LWIN, true), (LCTRL, true), (D, true), (D, false), (LCTRL, false), (LWIN, false)];
+        let ev = [
+            (LWIN, true),
+            (LCTRL, true),
+            (D, true),
+            (D, false),
+            (LCTRL, false),
+            (LWIN, false),
+        ];
         assert_eq!(run(CW, &ev).0, 0);
     }
 
     #[test]
     fn extra_modifier_makes_it_dirty() {
-        let ev = [(LCTRL, true), (LWIN, true), (LSHIFT, true), (LSHIFT, false), (LWIN, false), (LCTRL, false)];
+        let ev = [
+            (LCTRL, true),
+            (LWIN, true),
+            (LSHIFT, true),
+            (LSHIFT, false),
+            (LWIN, false),
+            (LCTRL, false),
+        ];
         assert_eq!(run(CW, &ev).0, 0);
     }
 
     #[test]
     fn dirty_clears_after_all_released() {
         let ev = [
-            (LCTRL, true), (LWIN, true), (RIGHT, true), (RIGHT, false), (LWIN, false), (LCTRL, false),
-            (LCTRL, true), (LWIN, true), (LWIN, false), (LCTRL, false),
+            (LCTRL, true),
+            (LWIN, true),
+            (RIGHT, true),
+            (RIGHT, false),
+            (LWIN, false),
+            (LCTRL, false),
+            (LCTRL, true),
+            (LWIN, true),
+            (LWIN, false),
+            (LCTRL, false),
         ];
         assert_eq!(run(CW, &ev).0, 1);
     }
@@ -274,7 +353,13 @@ mod tests {
     #[test]
     fn single_modifier_does_nothing() {
         assert_eq!(run(CW, &[(LWIN, true), (LWIN, false)]), (0, 0));
-        assert_eq!(run(CW, &[(LCTRL, true), (0x43, true), (0x43, false), (LCTRL, false)]), (0, 0));
+        assert_eq!(
+            run(
+                CW,
+                &[(LCTRL, true), (0x43, true), (0x43, false), (LCTRL, false)]
+            ),
+            (0, 0)
+        );
     }
 
     #[test]
@@ -313,7 +398,13 @@ mod tests {
 
     #[test]
     fn parse_format_pack_roundtrip() {
-        for s in ["Ctrl+Win", "Ctrl+Shift+Space", "Alt+F9", "Ctrl+Alt+K", "Win+1"] {
+        for s in [
+            "Ctrl+Win",
+            "Ctrl+Shift+Space",
+            "Alt+F9",
+            "Ctrl+Alt+K",
+            "Win+1",
+        ] {
             let c = Chord::parse(s).unwrap();
             assert_eq!(c.to_string(), s);
             assert_eq!(Chord::unpack(c.pack()), c);

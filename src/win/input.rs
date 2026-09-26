@@ -2,8 +2,9 @@
 
 use super::hook::INJECT_TAG;
 use windows::Win32::UI::Input::KeyboardAndMouse::{
-    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT, KEYEVENTF_EXTENDEDKEY,
-    KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput, VIRTUAL_KEY,
+    GetAsyncKeyState, INPUT, INPUT_0, INPUT_KEYBOARD, KEYBD_EVENT_FLAGS, KEYBDINPUT,
+    KEYEVENTF_EXTENDEDKEY, KEYEVENTF_KEYUP, MAPVK_VK_TO_VSC, MapVirtualKeyW, SendInput,
+    VIRTUAL_KEY,
 };
 
 const LCTRL: u16 = 0xA2;
@@ -14,7 +15,11 @@ const V: u16 = 0x56;
 const MODIFIERS: [u16; 8] = [0xA2, 0xA3, 0xA0, 0xA1, 0xA4, 0xA5, 0x5B, 0x5C];
 
 fn key(vk: u16, up: bool) -> INPUT {
-    let mut flags = if up { KEYEVENTF_KEYUP } else { KEYBD_EVENT_FLAGS(0) };
+    let mut flags = if up {
+        KEYEVENTF_KEYUP
+    } else {
+        KEYBD_EVENT_FLAGS(0)
+    };
     // Right Ctrl, right Alt and both Win keys are extended keys.
     if matches!(vk, 0xA3 | 0xA5 | 0x5B | 0x5C) {
         flags |= KEYEVENTF_EXTENDEDKEY;
@@ -45,7 +50,10 @@ fn send(inputs: &[INPUT]) -> bool {
 /// Returns false if Windows blocked the input (UIPI, secure desktop).
 pub fn paste(terminal: bool) -> bool {
     // SAFETY: plain query.
-    let held: Vec<u16> = MODIFIERS.into_iter().filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0).collect();
+    let held: Vec<u16> = MODIFIERS
+        .into_iter()
+        .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
+        .collect();
 
     let mut inputs: Vec<INPUT> = held.iter().map(|&vk| key(vk, true)).collect();
     inputs.push(key(LCTRL, false));

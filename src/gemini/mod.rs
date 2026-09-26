@@ -41,8 +41,12 @@ impl fmt::Display for GeminiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
             GeminiError::KeyMissing => f.write_str("No Gemini API key. Add one in Settings."),
-            GeminiError::KeyInvalid => f.write_str("Gemini API key is invalid. Check it in Settings."),
-            GeminiError::RateLimited => f.write_str("Gemini rate limit reached. Try again shortly."),
+            GeminiError::KeyInvalid => {
+                f.write_str("Gemini API key is invalid. Check it in Settings.")
+            }
+            GeminiError::RateLimited => {
+                f.write_str("Gemini rate limit reached. Try again shortly.")
+            }
             GeminiError::Offline => f.write_str("Can't reach Gemini. Check your connection."),
             GeminiError::Other(s) => write!(f, "Gemini error: {s}"),
         }
@@ -51,10 +55,16 @@ impl fmt::Display for GeminiError {
 
 /// Removes the key and any `key=` query value, collapses whitespace, caps length.
 pub fn scrub(s: &str, key: &str) -> String {
-    let mut out = if key.is_empty() { s.to_string() } else { s.replace(key, "***") };
+    let mut out = if key.is_empty() {
+        s.to_string()
+    } else {
+        s.replace(key, "***")
+    };
     let mut from = 0;
     while let Some(i) = out[from..].find("key=").map(|i| i + from + 4) {
-        let end = out[i..].find(|c: char| c == '&' || c == '"' || c.is_whitespace()).map_or(out.len(), |e| i + e);
+        let end = out[i..]
+            .find(|c: char| c == '&' || c == '"' || c.is_whitespace())
+            .map_or(out.len(), |e| i + e);
         out.replace_range(i..end, "***");
         from = i + 3;
     }
@@ -71,17 +81,35 @@ mod tests {
 
     #[test]
     fn http_mapping() {
-        assert_eq!(GeminiError::from_http(400, r#"{"reason":"API_KEY_INVALID"}"#, "k"), GeminiError::KeyInvalid);
-        assert_eq!(GeminiError::from_http(403, "", "k"), GeminiError::KeyInvalid);
-        assert_eq!(GeminiError::from_http(429, "", "k"), GeminiError::RateLimited);
-        assert_eq!(GeminiError::from_http(500, "boom", "k"), GeminiError::Other("HTTP 500: boom".into()));
-        assert_eq!(GeminiError::from_close(1008, "", "k"), GeminiError::KeyInvalid);
+        assert_eq!(
+            GeminiError::from_http(400, r#"{"reason":"API_KEY_INVALID"}"#, "k"),
+            GeminiError::KeyInvalid
+        );
+        assert_eq!(
+            GeminiError::from_http(403, "", "k"),
+            GeminiError::KeyInvalid
+        );
+        assert_eq!(
+            GeminiError::from_http(429, "", "k"),
+            GeminiError::RateLimited
+        );
+        assert_eq!(
+            GeminiError::from_http(500, "boom", "k"),
+            GeminiError::Other("HTTP 500: boom".into())
+        );
+        assert_eq!(
+            GeminiError::from_close(1008, "", "k"),
+            GeminiError::KeyInvalid
+        );
         assert!(GeminiError::from_close(1011, "x", "k").is_retryable());
     }
 
     #[test]
     fn scrub_removes_secrets() {
-        let s = scrub("bad AIzaSECRET at wss://h/x?key=AIzaSECRET&a=1 and key=other\n end", "AIzaSECRET");
+        let s = scrub(
+            "bad AIzaSECRET at wss://h/x?key=AIzaSECRET&a=1 and key=other\n end",
+            "AIzaSECRET",
+        );
         assert!(!s.contains("SECRET") && !s.contains("other"), "{s}");
         assert_eq!(s, "bad *** at wss://h/x?key=***&a=1 and key=*** end");
         assert_eq!(scrub(&"x".repeat(300), "").chars().count(), 201);

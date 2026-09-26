@@ -8,12 +8,15 @@ use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
 use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::System::RemoteDesktop::{NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification};
+use windows::Win32::System::RemoteDesktop::{
+    NOTIFY_FOR_THIS_SESSION, WTSRegisterSessionNotification,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW, MSG,
-    PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, RegisterClassW, WINDOW_EX_STYLE, WM_APP,
-    WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_POWERBROADCAST, WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW,
-    WS_POPUP, WTS_SESSION_LOCK, WTS_SESSION_UNLOCK,
+    CreateWindowExW, DefWindowProcW, DestroyWindow, DispatchMessageW, FindWindowW, GetMessageW,
+    MSG, PBT_APMRESUMEAUTOMATIC, PBT_APMSUSPEND, PostMessageW, PostQuitMessage, RegisterClassW,
+    WINDOW_EX_STYLE, WM_APP, WM_CLOSE, WM_DESTROY, WM_ENDSESSION, WM_POWERBROADCAST,
+    WM_WTSSESSION_CHANGE, WNDCLASSW, WS_EX_TOOLWINDOW, WS_POPUP, WTS_SESSION_LOCK,
+    WTS_SESSION_UNLOCK,
 };
 use windows::core::w;
 
@@ -40,7 +43,8 @@ fn send(ev: Event) {
 fn post(msg: u32) -> bool {
     let hwnd = IPC.load(Ordering::Acquire);
     // SAFETY: posting to a window handle we created; a stale handle just fails.
-    hwnd != 0 && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0)) }.is_ok()
+    hwnd != 0
+        && unsafe { PostMessageW(Some(HWND(hwnd as *mut _)), msg, WPARAM(0), LPARAM(0)) }.is_ok()
 }
 
 /// Ends the hook thread (from any thread).
@@ -66,7 +70,12 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
     // SAFETY: standard window class registration and creation; `wndproc` matches WNDPROC.
     let hwnd = unsafe {
         let hinstance = GetModuleHandleW(None)?;
-        let wc = WNDCLASSW { lpfnWndProc: Some(wndproc), hInstance: hinstance.into(), lpszClassName: CLASS, ..Default::default() };
+        let wc = WNDCLASSW {
+            lpfnWndProc: Some(wndproc),
+            hInstance: hinstance.into(),
+            lpszClassName: CLASS,
+            ..Default::default()
+        };
         RegisterClassW(&wc);
         CreateWindowExW(
             WINDOW_EX_STYLE(WS_EX_TOOLWINDOW.0),

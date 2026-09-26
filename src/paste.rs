@@ -1,8 +1,8 @@
 //! Paste worker: one job at a time, after the history row is committed.
 
 use crate::event::Event;
-use crate::win::{clipboard, input, window};
 use crate::win::window::Window;
+use crate::win::{clipboard, input, window};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::thread::sleep;
 use std::time::Duration;
@@ -53,7 +53,9 @@ impl Outcome {
     pub fn notice(&self) -> Option<&'static str> {
         match self {
             Outcome::Attempted => None,
-            Outcome::Skipped("elevated") => Some("Saved to history — can't paste into an admin window"),
+            Outcome::Skipped("elevated") => {
+                Some("Saved to history — can't paste into an admin window")
+            }
             Outcome::Skipped(_) => Some("Saved to history — no text box to paste into"),
             Outcome::Failed("input-blocked") => Some("Couldn't paste — text is on the clipboard"),
             Outcome::Failed(_) => Some("Couldn't paste — text is in history"),
@@ -87,13 +89,19 @@ fn run(jobs: Receiver<Job>, events: Sender<Event>) {
     for job in jobs {
         let outcome = paste(&job, owner);
         log::info!("paste row {}: {:?}", job.row_id, outcome);
-        let _ = events.send(Event::Pasted(Pasted { row_id: job.row_id, outcome }));
+        let _ = events.send(Event::Pasted(Pasted {
+            row_id: job.row_id,
+            outcome,
+        }));
     }
 }
 
 fn paste(job: &Job, owner: windows::Win32::Foundation::HWND) -> Outcome {
     // Prefer the window dictation started from; fall back to whatever is focused now.
-    let restored = job.target.filter(|&t| window::exists(t) && !window::is_own(t)).is_some_and(window::focus);
+    let restored = job
+        .target
+        .filter(|&t| window::exists(t) && !window::is_own(t))
+        .is_some_and(window::focus);
     let Some(w) = window::foreground() else {
         return Outcome::Skipped("no-window");
     };
@@ -118,7 +126,9 @@ fn paste(job: &Job, owner: windows::Win32::Foundation::HWND) -> Outcome {
     };
 
     let class = window::class_name(w);
-    let terminal = TERMINAL_CLASSES.iter().any(|c| c.eq_ignore_ascii_case(&class))
+    let terminal = TERMINAL_CLASSES
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(&class))
         || window::exe_name(w).is_some_and(|exe| TERMINAL_EXES.contains(&exe.as_str()));
     sleep(Duration::from_millis(10));
     if !input::paste(terminal) {

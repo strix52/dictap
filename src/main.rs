@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod capture;
 mod event;
 mod gemini;
 mod hotkey;
@@ -18,7 +19,9 @@ use std::time::Duration;
 use win::overlay::{self, Tone};
 use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
 use windows::Win32::System::Threading::CreateMutexW;
-use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
+use windows::Win32::UI::HiDpi::{
+    DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
+};
 use windows::core::w;
 
 fn data_dir() -> PathBuf {
@@ -59,20 +62,48 @@ fn main() {
             .expect("spawn ipc thread");
     }
 
-    // Stub core until capture/live land: proves hotkey → overlay end to end.
-    let mut recording = false;
+    // Stub core until live/core land: hotkey → capture → WAV, with overlay feedback.
+    let audio_dir = dir.join("audio");
+    let _ = std::fs::create_dir_all(&audio_dir);
+    let mut sid = 0u64;
+    let mut active: Option<capture::Capture> = None;
     for ev in rx {
         match ev {
-            Event::Toggle => {
-                recording = !recording;
-                log::info!("toggle -> recording={recording}");
-                if recording {
-                    overlay::show("Listening…", Tone::Recording, None);
-                } else {
-                    overlay::show("Stopped", Tone::Info, Some(Duration::from_millis(1200)));
+            Event::Toggle => match active.take() {
+                Some(c) => {
+                    c.stop();
+                    overlay::show("Stopping…", Tone::Busy, None);
                 }
-            }
-            Event::ShowHistory => overlay::show("History (not built yet)", Tone::Busy, Some(Duration::from_secs(2))),
+                None if capture::busy() => overlay::show(
+                    "Microphone still stuck — replug it",
+                    Tone::Error,
+                    Some(Duration::from_secs(3)),
+                ),
+                None => {
+                    sid += 1;
+                    let wav = audio_dir.join(format!("test-{sid}.wav"));
+                    active = Some(capture::start(sid, wav, tx.clone()));
+                    overlay::show("Starting…", Tone::Busy, None);
+                }
+            },
+            Event::Capture { sid: s, ev } if s == sid => match ev {
+                event::CaptureEvent::Opened => overlay::show("Listening…", Tone::Recording, None),
+                event::CaptureEvent::Failed(e) => {
+                    active = None;
+                    overlay::show(&e, Tone::Error, Some(Duration::from_secs(3)));
+                }
+                event::CaptureEvent::Ended { duration_ms, dropped, reason } => {
+                    active = None;
+                    log::info!("recorded {duration_ms} ms, {dropped} dropped, reason {reason:?}");
+                    let msg = format!("Recorded {:.1} s", duration_ms as f64 / 1000.0);
+                    overlay::show(&msg, Tone::Info, Some(Duration::from_secs(2)));
+                }
+            },
+            Event::ShowHistory => overlay::show(
+                "History (not built yet)",
+                Tone::Busy,
+                Some(Duration::from_secs(2)),
+            ),
             Event::Power(p) => log::info!("power: {p:?}"),
             Event::Quit => break,
             _ => {}

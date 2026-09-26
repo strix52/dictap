@@ -81,14 +81,19 @@ impl Store {
         conn.pragma_update(None, "journal_mode", "WAL")?;
         let version: i64 = conn.pragma_query_value(None, "user_version", |r| r.get(0))?;
         if version == 0 {
-            conn.execute_batch(&format!("BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"))?;
+            conn.execute_batch(&format!(
+                "BEGIN; {SCHEMA_V1} PRAGMA user_version = 1; COMMIT;"
+            ))?;
         }
         Ok(Store { conn })
     }
 
     /// Read-only connection for the UI thread.
     pub fn open_read(path: &Path) -> rusqlite::Result<Store> {
-        let conn = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX)?;
+        let conn = Connection::open_with_flags(
+            path,
+            OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+        )?;
         conn.busy_timeout(std::time::Duration::from_secs(2))?;
         Ok(Store { conn })
     }
@@ -103,7 +108,12 @@ impl Store {
     }
 
     /// Imported row; returns false if it was already imported.
-    pub fn insert_imported(&self, source: &str, source_id: i64, r: &NewRow<'_>) -> rusqlite::Result<bool> {
+    pub fn insert_imported(
+        &self,
+        source: &str,
+        source_id: i64,
+        r: &NewRow<'_>,
+    ) -> rusqlite::Result<bool> {
         let n = self.conn.execute(
             "INSERT OR IGNORE INTO transcriptions (created_ms, text, duration_ms, model, status, error, source, source_id)
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
@@ -113,12 +123,22 @@ impl Store {
     }
 
     pub fn set_paste(&self, id: i64, paste: &str) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE transcriptions SET paste = ?2 WHERE id = ?1", params![id, paste])?;
+        self.conn.execute(
+            "UPDATE transcriptions SET paste = ?2 WHERE id = ?1",
+            params![id, paste],
+        )?;
         Ok(())
     }
 
     /// Records a retry outcome. Text is only replaced when the retry produced some.
-    pub fn set_result(&self, id: i64, text: Option<&str>, status: &str, error: Option<&str>, audio_path: Option<&str>) -> rusqlite::Result<()> {
+    pub fn set_result(
+        &self,
+        id: i64,
+        text: Option<&str>,
+        status: &str,
+        error: Option<&str>,
+        audio_path: Option<&str>,
+    ) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE transcriptions SET text = COALESCE(?2, text), status = ?3, error = ?4, audio_path = ?5 WHERE id = ?1",
             params![id, text, status, error, audio_path],
@@ -128,7 +148,11 @@ impl Store {
 
     pub fn get(&self, id: i64) -> rusqlite::Result<Option<Row>> {
         self.conn
-            .query_row(&format!("SELECT {COLS} FROM transcriptions WHERE id = ?1"), [id], row)
+            .query_row(
+                &format!("SELECT {COLS} FROM transcriptions WHERE id = ?1"),
+                [id],
+                row,
+            )
             .optional()
     }
 
@@ -140,17 +164,23 @@ impl Store {
         ))?;
         let q = query.trim();
         let pattern = format!("%{}%", like_escape(q));
-        stmt.query_map(params![q, pattern, limit as i64], row)?.collect()
+        stmt.query_map(params![q, pattern, limit as i64], row)?
+            .collect()
     }
 
     /// Deletes a row, returning its kept audio path (the caller deletes the file).
     pub fn delete(&self, id: i64) -> rusqlite::Result<Option<String>> {
         let path: Option<String> = self
             .conn
-            .query_row("SELECT audio_path FROM transcriptions WHERE id = ?1", [id], |r| r.get(0))
+            .query_row(
+                "SELECT audio_path FROM transcriptions WHERE id = ?1",
+                [id],
+                |r| r.get(0),
+            )
             .optional()?
             .flatten();
-        self.conn.execute("DELETE FROM transcriptions WHERE id = ?1", [id])?;
+        self.conn
+            .execute("DELETE FROM transcriptions WHERE id = ?1", [id])?;
         Ok(path)
     }
 
@@ -159,16 +189,22 @@ impl Store {
         let mut stmt = self.conn.prepare(
             "SELECT id, audio_path FROM transcriptions WHERE audio_path IS NOT NULL ORDER BY created_ms, id",
         )?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?.collect()
+        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+            .collect()
     }
 
     pub fn clear_audio(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute("UPDATE transcriptions SET audio_path = NULL WHERE id = ?1", [id])?;
+        self.conn.execute(
+            "UPDATE transcriptions SET audio_path = NULL WHERE id = ?1",
+            [id],
+        )?;
         Ok(())
     }
 
     pub fn dictionary(&self) -> rusqlite::Result<Vec<String>> {
-        let mut stmt = self.conn.prepare("SELECT word FROM dictionary ORDER BY word")?;
+        let mut stmt = self
+            .conn
+            .prepare("SELECT word FROM dictionary ORDER BY word")?;
         stmt.query_map([], |r| r.get(0))?.collect()
     }
 
@@ -184,22 +220,32 @@ impl Store {
     pub fn add_words(&self, words: &[String]) -> rusqlite::Result<usize> {
         let mut added = 0;
         for w in words.iter().map(|w| w.trim()).filter(|w| !w.is_empty()) {
-            added += self.conn.execute("INSERT OR IGNORE INTO dictionary (word) VALUES (?1)", [w])?;
+            added += self
+                .conn
+                .execute("INSERT OR IGNORE INTO dictionary (word) VALUES (?1)", [w])?;
         }
         Ok(added)
     }
 
     pub fn meta(&self, key: &str) -> rusqlite::Result<Option<String>> {
-        self.conn.query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0)).optional()
+        self.conn
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |r| r.get(0))
+            .optional()
     }
 
     pub fn set_meta(&self, key: &str, value: &str) -> rusqlite::Result<()> {
-        self.conn.execute("INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)", [key, value])?;
+        self.conn.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+            [key, value],
+        )?;
         Ok(())
     }
 
     /// Runs `f` in a transaction (used by the importer).
-    pub fn in_tx<T>(&mut self, f: impl FnOnce(&Store) -> rusqlite::Result<T>) -> rusqlite::Result<T> {
+    pub fn in_tx<T>(
+        &mut self,
+        f: impl FnOnce(&Store) -> rusqlite::Result<T>,
+    ) -> rusqlite::Result<T> {
         self.conn.execute_batch("BEGIN")?;
         match f(self) {
             Ok(v) => {
@@ -231,7 +277,11 @@ mod tests {
     use super::*;
 
     fn temp_store() -> (Store, std::path::PathBuf) {
-        let dir = std::env::temp_dir().join(format!("gemdict-store-{}-{:?}", std::process::id(), std::thread::current().id()));
+        let dir = std::env::temp_dir().join(format!(
+            "gemdict-store-{}-{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("t.db");
         let _ = std::fs::remove_file(&path);
@@ -239,7 +289,12 @@ mod tests {
     }
 
     fn new(text: &str, created_ms: i64) -> NewRow<'_> {
-        NewRow { created_ms, text, status: OK, ..Default::default() }
+        NewRow {
+            created_ms,
+            text,
+            status: OK,
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -247,18 +302,38 @@ mod tests {
         let (s, path) = temp_store();
         let a = s.insert(&new("hello world", 1)).unwrap();
         s.insert(&new("100% sure_thing", 2)).unwrap();
-        let f = s.insert(&NewRow { status: FAILED, error: Some("offline"), audio_path: Some("x.wav"), ..new("", 3) }).unwrap();
-        assert_eq!(s.search("", 10).unwrap().iter().map(|r| r.created_ms).collect::<Vec<_>>(), [3, 2, 1]);
+        let f = s
+            .insert(&NewRow {
+                status: FAILED,
+                error: Some("offline"),
+                audio_path: Some("x.wav"),
+                ..new("", 3)
+            })
+            .unwrap();
+        assert_eq!(
+            s.search("", 10)
+                .unwrap()
+                .iter()
+                .map(|r| r.created_ms)
+                .collect::<Vec<_>>(),
+            [3, 2, 1]
+        );
         assert_eq!(s.search("WORLD", 10).unwrap()[0].id, a);
         assert_eq!(s.search("0%", 10).unwrap().len(), 1);
         assert_eq!(s.search("e_t", 10).unwrap().len(), 1);
         assert_eq!(s.search("o_w", 10).unwrap().len(), 0, "_ is literal");
         s.set_paste(a, "attempted").unwrap();
-        assert_eq!(s.get(a).unwrap().unwrap().paste.as_deref(), Some("attempted"));
+        assert_eq!(
+            s.get(a).unwrap().unwrap().paste.as_deref(),
+            Some("attempted")
+        );
         assert_eq!(s.kept_audio().unwrap(), vec![(f, "x.wav".to_string())]);
         s.set_result(f, Some("recovered"), OK, None, None).unwrap();
         let r = s.get(f).unwrap().unwrap();
-        assert_eq!((r.text.as_str(), r.status.as_str(), r.audio_path), ("recovered", OK, None));
+        assert_eq!(
+            (r.text.as_str(), r.status.as_str(), r.audio_path),
+            ("recovered", OK, None)
+        );
         assert_eq!(s.delete(a).unwrap(), None);
         assert!(s.get(a).unwrap().is_none());
         let reader = Store::open_read(&path).unwrap();
@@ -270,7 +345,11 @@ mod tests {
         let (mut s, _) = temp_store();
         assert!(s.insert_imported("openwhispr", 7, &new("a", 1)).unwrap());
         assert!(!s.insert_imported("openwhispr", 7, &new("a", 1)).unwrap());
-        assert_eq!(s.add_words(&["Orca".into(), "orca".into(), " ".into(), "Gemini".into()]).unwrap(), 2);
+        assert_eq!(
+            s.add_words(&["Orca".into(), "orca".into(), " ".into(), "Gemini".into()])
+                .unwrap(),
+            2
+        );
         s.set_dictionary(&["B".into(), "a".into()]).unwrap();
         assert_eq!(s.dictionary().unwrap(), ["a", "B"]);
         s.set_meta("k", "v").unwrap();

@@ -5,12 +5,20 @@
 pub fn parse_ts(s: &str) -> Option<i64> {
     let s = s.trim();
     let b = s.as_bytes();
-    if b.len() < 19 || b[4] != b'-' || b[7] != b'-' || !matches!(b[10], b' ' | b'T') || b[13] != b':' || b[16] != b':' {
+    if b.len() < 19
+        || b[4] != b'-'
+        || b[7] != b'-'
+        || !matches!(b[10], b' ' | b'T')
+        || b[13] != b':'
+        || b[16] != b':'
+    {
         return None;
     }
     let num = |r: std::ops::Range<usize>| -> Option<i64> {
         let t = s.get(r)?;
-        t.bytes().all(|c| c.is_ascii_digit()).then(|| t.parse().ok())?
+        t.bytes()
+            .all(|c| c.is_ascii_digit())
+            .then(|| t.parse().ok())?
     };
     let (y, mo, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
     let (h, mi, sec) = (num(11..13)?, num(14..16)?, num(17..19)?);
@@ -76,7 +84,14 @@ mod tests {
         assert_eq!(parse_ts("2025-09-26T06:30:00-0530"), Some(base));
         assert_eq!(parse_ts("1970-01-01 00:00:00"), Some(0));
         assert_eq!(parse_ts("2024-02-29 00:00:00"), Some(1_709_164_800_000));
-        for bad in ["", "2025-09-26", "2025/09/26 12:00:00", "2025-13-01 00:00:00", "2025-09-26 12:00:00 junk", "2025-09-26 12:00:00."] {
+        for bad in [
+            "",
+            "2025-09-26",
+            "2025/09/26 12:00:00",
+            "2025-13-01 00:00:00",
+            "2025-09-26 12:00:00 junk",
+            "2025-09-26 12:00:00.",
+        ] {
             assert_eq!(parse_ts(bad), None, "{bad}");
         }
     }

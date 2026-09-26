@@ -19,9 +19,16 @@ impl log::Log for FileLog {
         if !self.enabled(r.metadata()) {
             return;
         }
-        let ms = SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| d.as_millis());
+        let ms = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_or(0, |d| d.as_millis());
         let thread = std::thread::current();
-        let line = format!("{ms} {:5} [{}] {}\n", r.level(), thread.name().unwrap_or("?"), r.args());
+        let line = format!(
+            "{ms} {:5} [{}] {}\n",
+            r.level(),
+            thread.name().unwrap_or("?"),
+            r.args()
+        );
         if let Ok(mut f) = self.0.lock() {
             let _ = f.write_all(line.as_bytes());
         }
@@ -44,6 +51,10 @@ pub fn init(path: &Path) {
         return;
     };
     if log::set_logger(Box::leak(Box::new(FileLog(Mutex::new(file))))).is_ok() {
-        log::set_max_level(if cfg!(debug_assertions) { log::LevelFilter::Debug } else { log::LevelFilter::Info });
+        log::set_max_level(if cfg!(debug_assertions) {
+            log::LevelFilter::Debug
+        } else {
+            log::LevelFilter::Info
+        });
     }
 }
