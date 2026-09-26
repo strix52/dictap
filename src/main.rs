@@ -1,6 +1,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod autostart;
 mod capture;
 mod core;
 mod event;
@@ -11,6 +12,7 @@ mod key;
 mod logger;
 mod paste;
 mod settings;
+mod sound;
 mod store;
 mod win;
 
@@ -55,6 +57,10 @@ fn main() {
     let _ = std::fs::create_dir_all(&local);
     logger::init(&local.join("gemdict.log"));
     log::info!("gemdict {} starting", env!("CARGO_PKG_VERSION"));
+    std::panic::set_hook(Box::new(|info| {
+        log::error!("panic: {info}");
+        log::logger().flush();
+    }));
 
     let store = match store::Store::open(&dir.join("gemdict.db")) {
         Ok(s) => s,

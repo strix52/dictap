@@ -230,6 +230,9 @@ impl Core {
             cap,
             deadline: Instant::now() + OPEN_TIMEOUT,
         };
+        if self.settings.sounds {
+            crate::sound::start();
+        }
         overlay::show("Starting…", Tone::Busy, None);
     }
 
@@ -239,6 +242,9 @@ impl Core {
             return;
         };
         cap.stop();
+        if self.settings.sounds {
+            crate::sound::stop();
+        }
         let target = window::foreground().filter(|&w| !window::is_own(w));
         log::info!(
             "core {}: stop after {} ms",
@@ -539,7 +545,12 @@ impl Core {
             }
             UiCmd::TestKey => self.test_key(),
             UiCmd::ImportOpenWhispr => self.import_openwhispr(),
-            UiCmd::SetAutostart(on) => log::info!("autostart {on}: not built yet"),
+            UiCmd::SetAutostart(on) => {
+                if let Err(e) = crate::autostart::set(on) {
+                    log::error!("{e}");
+                    notice("Couldn't change start with Windows", Tone::Error);
+                }
+            }
         }
     }
 
