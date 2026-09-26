@@ -2,6 +2,7 @@
 
 mod audio;
 mod capture;
+mod core;
 mod event;
 mod gemini;
 mod hotkey;
@@ -25,8 +26,15 @@ use windows::Win32::UI::HiDpi::{
 };
 use windows::core::w;
 
+/// Roaming: settings and history.
 fn data_dir() -> PathBuf {
     let base = std::env::var_os("APPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
+    base.join("gemdict")
+}
+
+/// Local: log and audio.
+fn local_dir() -> PathBuf {
+    let base = std::env::var_os("LOCALAPPDATA").map_or_else(|| PathBuf::from("."), PathBuf::from);
     base.join("gemdict")
 }
 
@@ -42,14 +50,34 @@ fn main() {
     let _ = unsafe { SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2) };
 
     let dir = data_dir();
+    let local = local_dir();
     let _ = std::fs::create_dir_all(&dir);
-    logger::init(&dir.join("gemdict.log"));
+    let _ = std::fs::create_dir_all(&local);
+    logger::init(&local.join("gemdict.log"));
     log::info!("gemdict {} starting", env!("CARGO_PKG_VERSION"));
 
-    let settings = settings::Settings::load(&dir.join("settings.json"));
-    win::hook::set_chord(settings.chord());
+    let store = match store::Store::open(&dir.join("gemdict.db")) {
+        Ok(s) => s,
+        Err(e) => {
+            log::error!("history database: {e}");
+            overlay::show(
+                "Couldn't open history database",
+                Tone::Error,
+                Some(Duration::from_secs(5)),
+            );
+            std::thread::sleep(Duration::from_secs(5));
+            return;
+        }
+    };
 
     let (tx, rx) = channel::<Event>();
+    let paths = core::Paths {
+        settings: dir.join("settings.json"),
+        spool: local.join("spool"),
+        failed: local.join("failed"),
+    };
+    // Core first, so the hook uses the saved chord from the start.
+    let core = core::Core::new(paths, store, tx.clone());
     {
         let tx = tx.clone();
         std::thread::Builder::new()
@@ -62,58 +90,8 @@ fn main() {
             })
             .expect("spawn ipc thread");
     }
-
-    // Stub core until live/core land: hotkey → capture → WAV, with overlay feedback.
-    let audio_dir = dir.join("audio");
-    let _ = std::fs::create_dir_all(&audio_dir);
-    let mut sid = 0u64;
-    let mut active: Option<capture::Capture> = None;
-    for ev in rx {
-        match ev {
-            Event::Toggle => match active.take() {
-                Some(c) => {
-                    c.stop();
-                    overlay::show("Stopping…", Tone::Busy, None);
-                }
-                None if capture::busy() => overlay::show(
-                    "Microphone still stuck — replug it",
-                    Tone::Error,
-                    Some(Duration::from_secs(3)),
-                ),
-                None => {
-                    sid += 1;
-                    let wav = audio_dir.join(format!("test-{sid}.wav"));
-                    active = Some(capture::start(sid, wav, tx.clone()));
-                    overlay::show("Starting…", Tone::Busy, None);
-                }
-            },
-            Event::Capture { sid: s, ev } if s == sid => match ev {
-                event::CaptureEvent::Opened => overlay::show("Listening…", Tone::Recording, None),
-                event::CaptureEvent::Failed(e) => {
-                    active = None;
-                    overlay::show(&e, Tone::Error, Some(Duration::from_secs(3)));
-                }
-                event::CaptureEvent::Ended {
-                    duration_ms,
-                    dropped,
-                    reason,
-                } => {
-                    active = None;
-                    log::info!("recorded {duration_ms} ms, {dropped} dropped, reason {reason:?}");
-                    let msg = format!("Recorded {:.1} s", duration_ms as f64 / 1000.0);
-                    overlay::show(&msg, Tone::Info, Some(Duration::from_secs(2)));
-                }
-            },
-            Event::ShowHistory => overlay::show(
-                "History (not built yet)",
-                Tone::Busy,
-                Some(Duration::from_secs(2)),
-            ),
-            Event::Power(p) => log::info!("power: {p:?}"),
-            Event::Quit => break,
-            _ => {}
-        }
-    }
+    drop(tx);
+    core.run(rx);
     log::info!("gemdict exiting");
     log::logger().flush();
 }

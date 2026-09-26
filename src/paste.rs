@@ -25,7 +25,13 @@ const TERMINAL_EXES: &[&str] = &["termius.exe", "tabby.exe", "wave.exe", "rio.ex
 /// Wait before restoring the clipboard, so slow targets have read it (OpenWhispr's value).
 const RESTORE_DELAY: Duration = Duration::from_millis(500);
 
-pub struct Job {
+pub enum Job {
+    Paste(PasteJob),
+    /// Copy from history: just set the clipboard (kept out of clipboard history).
+    Copy(String),
+}
+
+pub struct PasteJob {
     pub row_id: i64,
     pub text: String,
     /// Foreground window when dictation stopped.
@@ -87,6 +93,15 @@ fn run(jobs: Receiver<Job>, events: Sender<Event>) {
         }
     };
     for job in jobs {
+        let job = match job {
+            Job::Paste(j) => j,
+            Job::Copy(text) => {
+                if clipboard::set_text(owner, &text).is_none() {
+                    log::warn!("copy: clipboard busy");
+                }
+                continue;
+            }
+        };
         let outcome = paste(&job, owner);
         log::info!("paste row {}: {:?}", job.row_id, outcome);
         let _ = events.send(Event::Pasted(Pasted {
@@ -96,7 +111,7 @@ fn run(jobs: Receiver<Job>, events: Sender<Event>) {
     }
 }
 
-fn paste(job: &Job, owner: windows::Win32::Foundation::HWND) -> Outcome {
+fn paste(job: &PasteJob, owner: windows::Win32::Foundation::HWND) -> Outcome {
     // Prefer the window dictation started from; fall back to whatever is focused now.
     let restored = job
         .target
