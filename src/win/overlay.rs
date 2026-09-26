@@ -35,8 +35,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     GetMessageW, HWND_TOPMOST, KillTimer, MA_NOACTIVATE, MSG, PostMessageW, RegisterClassW,
     SW_HIDE, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_SHOWWINDOW, SetTimer, SetWindowPos,
     ShowWindow, ULW_ALPHA, UpdateLayeredWindow, WM_APP, WM_MOUSEACTIVATE, WM_TIMER, WNDCLASSW,
-    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT,
-    WS_POPUP,
+    WS_EX_LAYERED, WS_EX_NOACTIVATE, WS_EX_TOOLWINDOW, WS_EX_TOPMOST, WS_EX_TRANSPARENT, WS_POPUP,
 };
 use windows::core::{HSTRING, w};
 
@@ -532,7 +531,12 @@ impl Hud {
         unsafe {
             let _ = KillTimer(Some(self.hwnd), HIDE_TIMER);
             if let Some(d) = after {
-                SetTimer(Some(self.hwnd), HIDE_TIMER, d.as_millis().max(1) as u32, None);
+                SetTimer(
+                    Some(self.hwnd),
+                    HIDE_TIMER,
+                    d.as_millis().max(1) as u32,
+                    None,
+                );
             }
         }
     }
@@ -756,7 +760,9 @@ impl Hud {
         let line_h = self.sc(LINE_H);
         let panel_w = self.sc(PANEL_W);
         let panel_gap = self.sc(PANEL_GAP);
-        let Some(surf) = self.surf.as_mut() else { return };
+        let Some(surf) = self.surf.as_mut() else {
+            return;
+        };
         let (w, h) = (surf.w, surf.h);
         let cap = (
             ((w - cap_w) / 2) as f32,
@@ -884,17 +890,31 @@ impl Hud {
         match &self.mode {
             Mode::Rec => {
                 let breathe = 0.5 + 0.5 * (secs * std::f32::consts::TAU / 1.6).cos();
-                disc(px, w, h, (x0 + DOT as f32 * s / 2.0, cy), DOT as f32 * s / 2.0, RED, (0.55 + 0.45 * breathe) * content_a);
+                disc(
+                    px,
+                    w,
+                    h,
+                    (x0 + DOT as f32 * s / 2.0, cy),
+                    DOT as f32 * s / 2.0,
+                    RED,
+                    (0.55 + 0.45 * breathe) * content_a,
+                );
                 let bx0 = x0 + (DOT + PART_GAP) as f32 * s;
                 let bw = (BAR_W * s).max(2.0);
                 for (i, bar) in self.bars.iter().enumerate() {
                     let bh = bw + bar.v * (BAR_MAX * s - bw);
                     let bx = bx0 + i as f32 * (BAR_W + BAR_GAP) * s;
                     let rect = (bx, cy - bh / 2.0, bw, bh);
-                    paint(px, w, h, (bx - 1.0, rect.1 - 1.0, bx + bw + 1.0, rect.1 + bh + 1.0), |x, y| {
-                        let d = rounded_rect_sd(x, y, rect, bw / 2.0);
-                        (INK, 0.92 * content_a * (0.5 - d).clamp(0.0, 1.0))
-                    });
+                    paint(
+                        px,
+                        w,
+                        h,
+                        (bx - 1.0, rect.1 - 1.0, bx + bw + 1.0, rect.1 + bh + 1.0),
+                        |x, y| {
+                            let d = rounded_rect_sd(x, y, rect, bw / 2.0);
+                            (INK, 0.92 * content_a * (0.5 - d).clamp(0.0, 1.0))
+                        },
+                    );
                 }
             }
             Mode::Busy(_) => {
@@ -1036,7 +1056,12 @@ fn line_height(hdc: HDC) -> i32 {
 }
 
 fn rect_i((x, y, w, h): (f32, f32, f32, f32)) -> (i32, i32, i32, i32) {
-    (x as i32, y as i32, (x + w).ceil() as i32, (y + h).ceil() as i32)
+    (
+        x as i32,
+        y as i32,
+        (x + w).ceil() as i32,
+        (y + h).ceil() as i32,
+    )
 }
 
 /// Signed distance from (px, py) to a rounded rectangle; negative inside.
@@ -1208,7 +1233,11 @@ fn shape(buf: &mut [u32], w: i32, h: i32, rect: (f32, f32, f32, f32), r: f32, al
     let rows: Vec<u32> = (0..h)
         .map(|y| {
             let t = ((y as f32 + 0.5 - rect.1) / rect.3).clamp(0.0, 1.0);
-            let under = over(over(0, Rgb(0, 0, 0), 0.30 * alpha), Rgb(0, 0, 0), 0.22 * alpha);
+            let under = over(
+                over(0, Rgb(0, 0, 0), 0.30 * alpha),
+                Rgb(0, 0, 0),
+                0.22 * alpha,
+            );
             over(under, lerp(FILL_TOP, FILL_BOTTOM, t), FILL_ALPHA * alpha)
         })
         .collect();
@@ -1221,16 +1250,28 @@ fn shape(buf: &mut [u32], w: i32, h: i32, rect: (f32, f32, f32, f32), r: f32, al
             return rows[y as usize];
         }
         let t = ((y - rect.1) / rect.3).clamp(0.0, 1.0);
-        out = over(out, Rgb(0, 0, 0), 0.30 * alpha * falloff(rounded_rect_sd(x, y, far, r), blur));
+        out = over(
+            out,
+            Rgb(0, 0, 0),
+            0.30 * alpha * falloff(rounded_rect_sd(x, y, far, r), blur),
+        );
         if d < 1.4 * tight + tdy {
-            out = over(out, Rgb(0, 0, 0), 0.22 * alpha * falloff(rounded_rect_sd(x, y, near, r), tight));
+            out = over(
+                out,
+                Rgb(0, 0, 0),
+                0.22 * alpha * falloff(rounded_rect_sd(x, y, near, r), tight),
+            );
         }
         let cover = (0.5 - d).clamp(0.0, 1.0);
         // A dark outer hairline keeps the edge crisp over dark backgrounds too.
         let outer = (1.5 - d).clamp(0.0, 1.0) - cover;
         out = over(out, Rgb(0, 0, 0), 0.45 * alpha * outer);
         if cover > 0.0 {
-            out = over(out, lerp(FILL_TOP, FILL_BOTTOM, t), FILL_ALPHA * alpha * cover);
+            out = over(
+                out,
+                lerp(FILL_TOP, FILL_BOTTOM, t),
+                FILL_ALPHA * alpha * cover,
+            );
             // Inner hairline, brighter at the top: reads as a lit edge.
             let inner = cover - (-0.5 - d).clamp(0.0, 1.0);
             out = over(out, Rgb(255, 255, 255), (0.16 - 0.11 * t) * alpha * inner);

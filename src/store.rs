@@ -184,6 +184,32 @@ impl Store {
         Ok(path)
     }
 
+    /// How many rows were created before `cutoff_ms`.
+    pub fn count_before(&self, cutoff_ms: i64) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COUNT(*) FROM transcriptions WHERE created_ms < ?1",
+            [cutoff_ms],
+            |r| r.get(0),
+        )
+    }
+
+    /// Deletes rows created before `cutoff_ms`, returning their kept audio paths (the
+    /// caller deletes the files).
+    pub fn delete_before(&self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
+        let paths = self
+            .conn
+            .prepare(
+                "SELECT audio_path FROM transcriptions WHERE created_ms < ?1 AND audio_path IS NOT NULL",
+            )?
+            .query_map([cutoff_ms], |r| r.get(0))?
+            .collect::<rusqlite::Result<Vec<String>>>()?;
+        self.conn.execute(
+            "DELETE FROM transcriptions WHERE created_ms < ?1",
+            [cutoff_ms],
+        )?;
+        Ok(paths)
+    }
+
     /// Rows holding kept audio, oldest first (for retention).
     pub fn kept_audio(&self) -> rusqlite::Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(

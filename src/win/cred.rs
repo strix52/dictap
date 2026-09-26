@@ -53,6 +53,7 @@ pub fn write(target: &str, user: &str, secret: &[u8]) -> windows::core::Result<(
 }
 
 /// Deletes a generic credential; missing is fine.
+#[cfg_attr(not(test), allow(dead_code))]
 pub fn delete(target: &str) -> windows::core::Result<()> {
     // SAFETY: plain call with a valid wide string.
     match unsafe { CredDeleteW(&HSTRING::from(target), CRED_TYPE_GENERIC, None) } {

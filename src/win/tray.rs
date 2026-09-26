@@ -25,6 +25,7 @@ const ID: u32 = 1;
 const CMD_HISTORY: usize = 1;
 const CMD_AUTOSTART: usize = 2;
 const CMD_QUIT: usize = 3;
+const CMD_SETTINGS: usize = 4;
 
 static RECORDING: AtomicBool = AtomicBool::new(false);
 static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
@@ -32,6 +33,7 @@ static TASKBAR_CREATED: AtomicU32 = AtomicU32::new(0);
 pub enum Action {
     None,
     History,
+    Settings,
     Autostart(bool),
     Quit,
 }
@@ -167,6 +169,7 @@ fn menu(hwnd: HWND) -> Action {
             return Action::None;
         };
         let _ = AppendMenuW(m, MF_STRING, CMD_HISTORY, w!("History"));
+        let _ = AppendMenuW(m, MF_STRING, CMD_SETTINGS, w!("Settings"));
         let check = if autostart { MF_CHECKED } else { MF_UNCHECKED };
         let _ = AppendMenuW(
             m,
@@ -192,6 +195,7 @@ fn menu(hwnd: HWND) -> Action {
         let _ = DestroyMenu(m);
         match cmd.0 as usize {
             CMD_HISTORY => Action::History,
+            CMD_SETTINGS => Action::Settings,
             CMD_AUTOSTART => Action::Autostart(!autostart),
             CMD_QUIT => Action::Quit,
             _ => Action::None,

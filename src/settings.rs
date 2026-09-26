@@ -13,6 +13,8 @@ pub struct Settings {
     /// BCP-47 code; empty means auto-detect (no `languageCodes` sent).
     pub language: String,
     pub sounds: bool,
+    /// Dictations older than this many days are deleted; 0 keeps everything.
+    pub keep_days: u32,
 }
 
 impl Default for Settings {
@@ -21,6 +23,7 @@ impl Default for Settings {
             hotkey: Chord::DEFAULT.to_string(),
             language: "en-GB".into(),
             sounds: true,
+            keep_days: 0,
         }
     }
 }
@@ -76,6 +79,7 @@ mod tests {
             hotkey: "Ctrl+Shift+Space".into(),
             language: String::new(),
             sounds: false,
+            keep_days: 30,
         };
         s.save(&path).unwrap();
         assert_eq!(Settings::load(&path), s);

@@ -37,6 +37,8 @@ pub enum UiCmd {
     Copy(i64),
     Retry(i64),
     Delete(i64),
+    /// Delete every dictation created before this time (unix ms).
+    ClearBefore(i64),
     SaveSettings(crate::settings::Settings),
     SetDictionary(Vec<String>),
     SetApiKey(String),

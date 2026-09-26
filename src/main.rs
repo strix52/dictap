@@ -50,7 +50,7 @@ fn main() {
     let _mutex = unsafe { CreateMutexW(None, false, w!("Local\\gemdict-7c1e0d2a")) };
     // SAFETY: plain query right after the create call.
     if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
-        win::ipc::signal_existing();
+        win::ipc::signal_existing(win::app::Page::from_args());
         return;
     }
     // SAFETY: process-wide setting made before any window exists.
@@ -87,8 +87,7 @@ fn main() {
         spool: local.join("spool"),
         failed: local.join("failed"),
     };
-    win::history::init(dir.join("gemdict.db"));
-    win::settings_ui::init(dir.join("settings.json"), dir.join("gemdict.db"));
+    win::app::init(dir.join("settings.json"), dir.join("gemdict.db"));
     // Core first, so the hook uses the saved chord from the start.
     let core = core::Core::new(paths, store, tx.clone());
     let ipc = {
@@ -149,7 +148,11 @@ fn overlay_demo() {
     overlay::show("Listening…", Tone::Recording, None);
     overlay::words("hello there", "");
     pause(800);
-    overlay::status("Couldn't paste — copied to clipboard", Tone::Error, Some(Duration::from_secs(2)));
+    overlay::status(
+        "Couldn't paste — copied to clipboard",
+        Tone::Error,
+        Some(Duration::from_secs(2)),
+    );
     pause(2800);
     overlay::show("Nothing heard", Tone::Info, Some(Duration::from_secs(2)));
     pause(2800);

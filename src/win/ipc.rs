@@ -57,13 +57,13 @@ pub fn quit() {
     post(WM_CLOSE);
 }
 
-/// If another gemdict is running, asks it to show its history and returns true.
-pub fn signal_existing() -> bool {
+/// If another gemdict is running, asks it to show `page` and returns true.
+pub fn signal_existing(page: super::app::Page) -> bool {
     // SAFETY: plain lookup by class name.
     match unsafe { FindWindowW(CLASS, None) } {
         Ok(hwnd) if !hwnd.is_invalid() => {
             // SAFETY: posting a private message to the other instance's window.
-            unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(0), LPARAM(0)) }.is_ok()
+            unsafe { PostMessageW(Some(hwnd), WM_APP_SHOW, WPARAM(page as usize), LPARAM(0)) }.is_ok()
         }
         _ => false,
     }
@@ -108,7 +108,7 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that owns the window and hook.
     while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
-        if super::history::pre_translate(&msg) || super::settings_ui::pre_translate(&msg) {
+        if super::app::pre_translate(&msg) {
             continue;
         }
         unsafe {
@@ -130,7 +130,7 @@ fn reinstall_hook(hwnd: HWND) {
 unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
     match msg {
         WM_APP_TOGGLE => send(Event::Toggle),
-        WM_APP_SHOW => super::history::show(),
+        WM_APP_SHOW => super::app::show(super::app::Page::from_index(wparam.0)),
         WM_POWERBROADCAST => match wparam.0 as u32 {
             PBT_APMSUSPEND => send(Event::Power(PowerEvent::Suspend)),
             PBT_APMRESUMEAUTOMATIC => {
@@ -158,7 +158,8 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         super::tray::WM_APP_TRAY_STATE => super::tray::refresh(hwnd),
         super::tray::WM_APP_TRAY => match super::tray::on_callback(hwnd, lparam) {
-            super::tray::Action::History => super::history::show(),
+            super::tray::Action::History => super::app::show(super::app::Page::History),
+            super::tray::Action::Settings => super::app::show(super::app::Page::Settings),
             super::tray::Action::Autostart(on) => send(Event::Ui(UiCmd::SetAutostart(on))),
             super::tray::Action::Quit => send(Event::Quit),
             super::tray::Action::None => {}

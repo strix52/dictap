@@ -1,16 +1,15 @@
-//! Small helpers shared by the history and settings windows (ipc thread only).
+//! Small helpers for the app window (ipc thread only).
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT, WPARAM};
 use windows::Win32::Graphics::Gdi::{
-    CreateCompatibleDC, CreateFontIndirectW, CreateFontW, DeleteDC, DeleteObject, GetTextFaceW,
-    HFONT, HGDIOBJ, SelectObject,
+    CreateCompatibleDC, CreateFontW, DeleteDC, DeleteObject, GetTextFaceW, HFONT, HGDIOBJ,
+    SelectObject,
 };
 use windows::Win32::System::LibraryLoader::GetModuleHandleW;
-use windows::Win32::UI::HiDpi::{GetDpiForWindow, SystemParametersInfoForDpi};
+use windows::Win32::UI::HiDpi::GetDpiForWindow;
 use windows::Win32::UI::WindowsAndMessaging::{
-    CreateWindowExW, GetWindowTextLengthW, GetWindowTextW, HMENU, MoveWindow, NONCLIENTMETRICSW,
-    SPI_GETNONCLIENTMETRICS, SendMessageW, SetWindowTextW, WINDOW_EX_STYLE, WINDOW_STYLE,
-    WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
+    CreateWindowExW, GetWindowTextLengthW, GetWindowTextW, HMENU, SendMessageW, SetWindowTextW,
+    WINDOW_EX_STYLE, WINDOW_STYLE, WM_SETFONT, WS_CHILD, WS_TABSTOP, WS_VISIBLE,
 };
 use windows::core::{HSTRING, PCWSTR};
 
@@ -33,7 +32,17 @@ pub fn px(v: i32, dpi: u32) -> i32 {
 pub fn face() -> &'static str {
     static FACE: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
     FACE.get_or_init(|| {
-        const WANT: &str = "Segoe UI Variable Text";
+        if installed("Segoe UI Variable Text") {
+            "Segoe UI Variable Text"
+        } else {
+            "Segoe UI"
+        }
+    })
+}
+
+/// Whether GDI has a font family of this name.
+pub fn installed(want: &str) -> bool {
+    {
         // SAFETY: a scratch DC and font, both released here. GDI substitutes a different
         // face when the requested one is missing; GetTextFaceW reports what it picked.
         unsafe {
@@ -52,7 +61,7 @@ pub fn face() -> &'static str {
                 Default::default(),
                 Default::default(),
                 0,
-                &HSTRING::from(WANT),
+                &HSTRING::from(want),
             );
             let old = SelectObject(dc, HGDIOBJ(f.0));
             let mut buf = [0u16; 64];
@@ -60,31 +69,8 @@ pub fn face() -> &'static str {
             SelectObject(dc, old);
             let _ = DeleteObject(HGDIOBJ(f.0));
             let _ = DeleteDC(dc);
-            if String::from_utf16_lossy(&buf[..n.min(buf.len())]).eq_ignore_ascii_case(WANT) {
-                WANT
-            } else {
-                "Segoe UI"
-            }
+            String::from_utf16_lossy(&buf[..n.min(buf.len())]).eq_ignore_ascii_case(want)
         }
-    })
-}
-
-/// The system message font at this dpi. The caller owns it.
-pub fn font(dpi: u32) -> HFONT {
-    let mut ncm = NONCLIENTMETRICSW {
-        cbSize: size_of::<NONCLIENTMETRICSW>() as u32,
-        ..Default::default()
-    };
-    // SAFETY: ncm is sized; the font is created from its copy.
-    unsafe {
-        let _ = SystemParametersInfoForDpi(
-            SPI_GETNONCLIENTMETRICS.0,
-            ncm.cbSize,
-            Some(std::ptr::from_mut(&mut ncm).cast()),
-            0,
-            dpi,
-        );
-        CreateFontIndirectW(&ncm.lfMessageFont)
     }
 }
 
@@ -120,11 +106,6 @@ pub fn child(
     h
 }
 
-pub fn place(h: HWND, r: RECT) {
-    // SAFETY: moving our own child.
-    let _ = unsafe { MoveWindow(h, r.left, r.top, r.right - r.left, r.bottom - r.top, true) };
-}
-
 pub fn rect(x: i32, y: i32, w: i32, h: i32) -> RECT {
     RECT {
         left: x,
@@ -149,8 +130,8 @@ pub fn set_text(h: HWND, s: &str) {
     let _ = unsafe { SetWindowTextW(h, &HSTRING::from(s)) };
 }
 
-/// Unix ms → "2026-09-26 22:36" in local time.
-pub fn local_time(ms: i64) -> String {
+/// Unix ms → local calendar time.
+pub fn local(ms: i64) -> Option<windows::Win32::Foundation::SYSTEMTIME> {
     use windows::Win32::Foundation::{FILETIME, SYSTEMTIME};
     use windows::Win32::System::Time::{FileTimeToSystemTime, SystemTimeToTzSpecificLocalTime};
     let ticks = (ms.max(0) as u64) * 10_000 + 116_444_736_000_000_000;
@@ -164,11 +145,8 @@ pub fn local_time(ms: i64) -> String {
         if FileTimeToSystemTime(&ft, &mut utc).is_err()
             || SystemTimeToTzSpecificLocalTime(None, &utc, &mut local).is_err()
         {
-            return String::new();
+            return None;
         }
     }
-    format!(
-        "{:04}-{:02}-{:02} {:02}:{:02}",
-        local.wYear, local.wMonth, local.wDay, local.wHour, local.wMinute
-    )
+    Some(local)
 }

@@ -94,6 +94,7 @@ impl Core {
         };
         core.recover_spool();
         core.first_run_import();
+        core.prune_history();
         log::info!(
             "core: key {}",
             if core.key.is_some() {
@@ -447,7 +448,8 @@ impl Core {
         } else {
             self.enforce_retention();
         }
-        crate::win::history::changed();
+        self.prune_history();
+        crate::win::app::changed();
         log::info!("core {sid}: row {id} {status}, {} chars", text.len());
 
         if text.is_empty() {
@@ -492,7 +494,7 @@ impl Core {
 
     fn retry_done(&mut self, id: i64, ev: LiveEvent) {
         self.finish_retry(id, ev);
-        crate::win::history::changed();
+        crate::win::app::changed();
     }
 
     fn finish_retry(&mut self, id: i64, ev: LiveEvent) {
@@ -541,16 +543,21 @@ impl Core {
                     if let Some(p) = path {
                         let _ = std::fs::remove_file(p);
                     }
-                    crate::win::history::changed();
+                    crate::win::app::changed();
                 }
                 Err(e) => log::error!("delete {id}: {e}"),
             },
+            UiCmd::ClearBefore(cutoff) => self.clear_before(cutoff),
             UiCmd::SaveSettings(s) => {
                 crate::win::hook::set_chord(s.chord());
                 if let Err(e) = s.save(&self.paths.settings) {
                     log::error!("settings save: {e}");
                 }
+                let prune = s.keep_days != self.settings.keep_days;
                 self.settings = s;
+                if prune {
+                    self.prune_history();
+                }
             }
             UiCmd::SetDictionary(words) => {
                 if let Err(e) = self.store.set_dictionary(&words) {
@@ -633,7 +640,7 @@ impl Core {
                 }
             }
         };
-        crate::win::history::changed();
+        crate::win::app::changed();
         match history {
             Ok(r) => notice(
                 &format!("Imported {} from OpenWhispr{key_note}", r.imported),
@@ -686,6 +693,25 @@ impl Core {
             }
         }
         self.enforce_retention();
+    }
+
+    /// Applies the "keep history" setting.
+    fn prune_history(&mut self) {
+        if self.settings.keep_days > 0 {
+            self.clear_before(now_ms() - i64::from(self.settings.keep_days) * 86_400_000);
+        }
+    }
+
+    fn clear_before(&mut self, cutoff_ms: i64) {
+        match self.store.delete_before(cutoff_ms) {
+            Ok(paths) => {
+                for p in paths {
+                    let _ = std::fs::remove_file(p);
+                }
+                crate::win::app::changed();
+            }
+            Err(e) => log::error!("clear history: {e}"),
+        }
     }
 
     /// At most `KEEP_FILES` kept WAVs / `KEEP_BYTES`, oldest dropped first.
