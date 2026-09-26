@@ -1,0 +1,50 @@
+//! The cross-thread vocabulary. Everything the core reacts to arrives as an `Event`.
+
+use crate::gemini::GeminiError;
+
+pub enum Event {
+    /// Hotkey or tray: start or stop dictation.
+    Toggle,
+    /// Tray click or a second instance was launched.
+    ShowHistory,
+    Power(PowerEvent),
+    Ui(UiCmd),
+    Capture { sid: u64, ev: CaptureEvent },
+    Live { sid: u64, ev: LiveEvent },
+    Pasted(crate::paste::Pasted),
+    Quit,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PowerEvent {
+    Suspend,
+    Resume,
+    Lock,
+    Unlock,
+}
+
+pub enum UiCmd {
+    Copy(i64),
+    Retry(i64),
+    Delete(i64),
+    SaveSettings(crate::settings::Settings),
+    SetDictionary(Vec<String>),
+    SetApiKey(String),
+    TestKey,
+    ImportOpenWhispr,
+    SetAutostart(bool),
+}
+
+pub enum CaptureEvent {
+    Opened,
+    Failed(String),
+    /// Capture stopped and the WAV is finalized. `reason` is set when it ended on its own
+    /// (device unplugged, stream error).
+    Ended { duration_ms: u64, dropped: u32, reason: Option<String> },
+}
+
+pub enum LiveEvent {
+    /// Final result of this dictation (Live, or batch fallback).
+    Done { text: String, provisional: bool, model: &'static str, error: Option<GeminiError> },
+    Failed(GeminiError),
+}
