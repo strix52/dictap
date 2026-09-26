@@ -2,3 +2,4 @@ reference/
 target/
 *.db
 *.env
+probes/

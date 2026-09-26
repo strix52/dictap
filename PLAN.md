@@ -200,7 +200,7 @@ CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT);
 
 **API key** (verified against `src/helpers/secretCrypto.js`)
 - OpenWhispr keeps a random 32-byte master key in Credential Manager (`@napi-rs/keyring`, service `OpenWhispr`, account `secrets-master-key`, stored base64) and each secret in `secure-keys\<NAME>.enc` as `IV(12) | tag(16) | AES-256-GCM ciphertext`.
-- Import: `CredEnumerateW` filtered to generic credentials whose target contains `OpenWhispr` and whose user name is `secrets-master-key` (the exact target-name format of keyring-rs is probed, not assumed). Decode the blob (UTF-16LE, else UTF-8) → base64 → must be 32 bytes. Read `secure-keys\GEMINI_API_KEY.enc`, decrypt with `win/aesgcm.rs` (BCrypt, `BCRYPT_CHAIN_MODE_GCM`). Store in gemdict's own credential (`CredWriteW`, target `gemdict/gemini-api-key`, `CRED_PERSIST_LOCAL_MACHINE`). Then run the key test.
+- Import: `CredReadW(CRED_TYPE_GENERIC, "secrets-master-key.OpenWhispr")` (target name confirmed with `cmdkey /list` on this machine; keyring-rs uses `<user>.<service>`). Decode the blob (UTF-16LE, else UTF-8) → base64 → must be 32 bytes. Read `secure-keys\GEMINI_API_KEY.enc`, decrypt with `win/aesgcm.rs` (BCrypt, `BCRYPT_CHAIN_MODE_GCM`). Store in gemdict's own credential (`CredWriteW`, target `gemdict/gemini-api-key`, `CRED_PERSIST_LOCAL_MACHINE`). Then run the key test.
 - The master key and plaintext are zeroed after use, never logged, never displayed. OpenWhispr's credential and files are only read.
 - If the master credential is missing (older safeStorage mode) or decryption fails: check `.env` for `GEMINI_API_KEY=`; otherwise Settings says "Couldn't import from OpenWhispr — paste a key".
 
