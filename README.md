@@ -26,6 +26,11 @@
 </p>
 
 <p align="center">
+  <a href="docs/media/dictap-promo.mp4"><img src="docs/images/promo.webp" alt="36-second dictap film: press Ctrl + Win, talk, and the text is pasted at your cursor" width="800"></a><br>
+  <sub><a href="docs/media/dictap-promo.mp4">▶ Watch the 36 s film with sound</a></sub>
+</p>
+
+<p align="center">
   <img src="docs/images/demo.gif" alt="The dictap overlay showing a live transcript while someone speaks" width="760">
 </p>
 
