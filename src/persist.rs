@@ -98,7 +98,11 @@ pub fn decide_commit(
             status: store::PROVISIONAL,
             text: text.clone(),
             model: Some(model),
-            error: Some(join(reason, note)),
+            error: if clean && !reason.warns() {
+                None
+            } else {
+                Some(join(reason, note))
+            },
             keep_audio: true,
             incomplete_paste: reason.warns() || !clean,
             may_deliver: save_only.is_none(),
@@ -555,7 +559,7 @@ pub struct Retention {
     pub excess: u32,
 }
 
-/// Keeps at most `max_files` / `max_bytes` of kept audio, oldest first, never touching
+/// Trims usable unwarned recordings first, oldest within each group, never touching
 /// `pinned` files. Expired audio loses its reference; the history text stays.
 pub fn enforce_retention(
     store: &Store,
@@ -758,6 +762,7 @@ mod tests {
         );
         assert_eq!(d.status, store::PROVISIONAL);
         assert!(d.keep_audio && !d.incomplete_paste);
+        assert_eq!(d.error, None);
         // ...unless the capture itself had trouble.
         let bad = CaptureReport {
             dropped_chunks: 1,
@@ -770,6 +775,21 @@ mod tests {
                 &FinishDisposition::Deliver
             )
             .incomplete_paste
+        );
+        let d = decide_commit(
+            &inc(Failure::Unconfirmed),
+            &bad,
+            &FinishDisposition::Deliver,
+        );
+        assert!(d.error.as_deref().unwrap().contains("audio chunks dropped"));
+        assert!(
+            decide_commit(
+                &inc(Failure::Timeout),
+                &clean(),
+                &FinishDisposition::Deliver
+            )
+            .error
+            .is_some()
         );
     }
 
@@ -1272,6 +1292,134 @@ mod tests {
         let r = enforce_retention(&e.store, &RealFs, 1, u64::MAX, &HashSet::new());
         assert_eq!(r.removed, 1);
         assert!(!paths[0].exists());
+    }
+
+    #[test]
+    fn retention_prioritizes_recovery_audio_for_file_and_byte_caps() {
+        for byte_cap in [false, true] {
+            let e = env();
+            let mut paths = Vec::new();
+            for n in 0..27u64 {
+                let p = e.dirs.failed_path(SessionId(2000 + n));
+                wav(&p, 200);
+                let name = p.to_string_lossy();
+                let (status, text, error) = match n {
+                    0 => (store::FAILED, "", Some("offline")),
+                    1 => (store::PROVISIONAL, "partial", Some("timeout")),
+                    _ => (
+                        store::PROVISIONAL,
+                        "words",
+                        if n % 2 == 0 {
+                            Some(crate::outcome::UNCONFIRMED_MESSAGE)
+                        } else {
+                            None
+                        },
+                    ),
+                };
+                e.store
+                    .insert_dictation_once(
+                        SessionId(2000 + n),
+                        &NewRow {
+                            created_ms: n as i64,
+                            status,
+                            text,
+                            error,
+                            audio_path: Some(&name),
+                            ..Default::default()
+                        },
+                    )
+                    .unwrap();
+                paths.push(p);
+            }
+            let size = RealFs.len(&paths[0]);
+            let r = enforce_retention(
+                &e.store,
+                &RealFs,
+                if byte_cap { usize::MAX } else { 20 },
+                if byte_cap { size * 20 } else { u64::MAX },
+                &HashSet::new(),
+            );
+            assert_eq!(r.removed, 7);
+            assert!(paths[0].exists() && paths[1].exists());
+            assert!(paths[2..9].iter().all(|p| !p.exists()));
+            assert!(paths[9..].iter().all(|p| p.exists()));
+            assert_eq!(rows(&e).len(), 27);
+        }
+    }
+
+    #[test]
+    fn failed_audio_alone_stays_bounded_oldest_first() {
+        let e = env();
+        let mut paths = Vec::new();
+        for n in 0..25u64 {
+            let p = e.dirs.failed_path(SessionId(3000 + n));
+            wav(&p, 200);
+            let name = p.to_string_lossy();
+            e.store
+                .insert_dictation_once(
+                    SessionId(3000 + n),
+                    &NewRow {
+                        created_ms: n as i64,
+                        status: store::FAILED,
+                        error: Some("offline"),
+                        audio_path: Some(&name),
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            paths.push(p);
+        }
+        let r = enforce_retention(&e.store, &RealFs, 20, u64::MAX, &HashSet::new());
+        assert_eq!(r.removed, 5);
+        assert!(paths[..5].iter().all(|p| !p.exists()));
+        assert!(paths[5..].iter().all(|p| p.exists()));
+    }
+
+    #[test]
+    fn history_hides_only_exact_ordinary_legacy_warning() {
+        let e = env();
+        let message = crate::outcome::UNCONFIRMED_MESSAGE;
+        let combined = format!("{message}; 1 audio chunks dropped");
+        for (n, status, text, error, visible) in [
+            (0, store::PROVISIONAL, "words", Some(message), false),
+            (1, store::PROVISIONAL, "words", None, false),
+            (
+                2,
+                store::PROVISIONAL,
+                "words",
+                Some(combined.as_str()),
+                true,
+            ),
+            (3, store::FAILED, "", Some(message), true),
+            (4, store::PROVISIONAL, "", Some(message), true),
+            (
+                5,
+                store::PROVISIONAL,
+                "words",
+                Some("unknown failure"),
+                true,
+            ),
+        ] {
+            let (id, _) = e
+                .store
+                .insert_dictation_once(
+                    SessionId(4000 + n),
+                    &NewRow {
+                        status,
+                        text,
+                        error,
+                        ..Default::default()
+                    },
+                )
+                .unwrap();
+            let row = rows(&e).into_iter().find(|r| r.id == id).unwrap();
+            assert_eq!(row.warning().is_some(), visible);
+            assert_eq!(
+                row.error.as_deref(),
+                error,
+                "view filtering does not rewrite history"
+            );
+        }
     }
 
     /// 15. Repeated terminal events: one row, one disposition.

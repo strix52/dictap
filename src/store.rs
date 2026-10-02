@@ -45,6 +45,17 @@ pub struct Row {
     pub audio_path: Option<String>,
 }
 
+impl Row {
+    /// Ordinary unconfirmed Live output is retained for Retry, not a failure warning.
+    pub fn warning(&self) -> Option<&str> {
+        self.error.as_deref().filter(|e| {
+            !(self.status == PROVISIONAL
+                && !self.text.trim().is_empty()
+                && *e == crate::outcome::UNCONFIRMED_MESSAGE)
+        })
+    }
+}
+
 /// A row to insert.
 #[derive(Default)]
 pub struct NewRow<'a> {
@@ -411,13 +422,19 @@ impl Store {
         Ok(())
     }
 
-    /// Rows holding kept audio, oldest first (for retention).
+    /// Evict usable, unwarned text first, then recovery audio; oldest first within each group.
     pub fn kept_audio(&self) -> rusqlite::Result<Vec<(i64, String)>> {
         let mut stmt = self.conn.prepare(
-            "SELECT id, audio_path FROM transcriptions WHERE audio_path IS NOT NULL ORDER BY created_ms, id",
+            "SELECT id, audio_path FROM transcriptions WHERE audio_path IS NOT NULL
+             ORDER BY CASE WHEN trim(text) <> '' AND
+               ((status = 'ok' AND error IS NULL) OR
+                (status = 'provisional' AND (error IS NULL OR error = ?1)))
+               THEN 0 ELSE 1 END, created_ms, id",
         )?;
-        stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
-            .collect()
+        stmt.query_map([crate::outcome::UNCONFIRMED_MESSAGE], |r| {
+            Ok((r.get(0)?, r.get(1)?))
+        })?
+        .collect()
     }
 
     pub fn dictionary(&self) -> rusqlite::Result<Vec<String>> {

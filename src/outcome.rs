@@ -3,6 +3,9 @@
 //! Providers return these; `core::decide_commit` is the only place that turns one (plus the
 //! capture's terminal state) into a status, a stored model, and an audio-retention rule.
 
+/// Exact historical message, used to recognize ordinary Live rows without hiding real errors.
+pub const UNCONFIRMED_MESSAGE: &str = "Live transcript not confirmed complete";
+
 use crate::gemini::GeminiError;
 use std::fmt;
 
@@ -93,7 +96,7 @@ impl fmt::Display for Failure {
             Failure::Interrupted => f.write_str("Interrupted (locked or asleep)"),
             Failure::Timeout => f.write_str("Timed out"),
             Failure::Capture(s) => write!(f, "Recording problem: {s}"),
-            Failure::Unconfirmed => f.write_str("Live transcript not confirmed complete"),
+            Failure::Unconfirmed => f.write_str(UNCONFIRMED_MESSAGE),
             Failure::TooLarge => f.write_str("Transcript too long"),
             Failure::Internal(s) => write!(f, "Internal error: {s}"),
         }

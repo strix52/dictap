@@ -2340,7 +2340,7 @@ impl App {
                     let (created, dur) = (rw.created_ms, rw.duration_ms);
                     let tag = match rw.status.as_str() {
                         store::FAILED => Some("Failed"),
-                        store::PROVISIONAL => Some("Incomplete"),
+                        store::PROVISIONAL if rw.warning().is_some() => Some("Incomplete"),
                         _ => None,
                     };
                     let text = preview(&rw.text);
@@ -2434,7 +2434,7 @@ impl App {
         if let Some(m) = &row.model {
             meta.push(m.clone());
         }
-        let error = row.error.clone();
+        let error = row.warning().map(str::to_owned);
         let (has_text, has_audio) = (!row.text.is_empty(), row.audio_path.is_some());
         p.text(
             &title,
