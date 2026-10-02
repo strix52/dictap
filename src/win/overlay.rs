@@ -15,6 +15,7 @@
 //! `UpdateLayeredWindow`.
 
 use super::ui;
+use crate::hud::{EpochGate, HideTimer, HudCommand, OwnedPresentation};
 use std::cell::RefCell;
 use std::sync::atomic::{AtomicIsize, AtomicU32, Ordering};
 use std::sync::{Mutex, OnceLock};
@@ -121,7 +122,8 @@ enum Cmd {
 }
 
 static HWND_VAL: AtomicIsize = AtomicIsize::new(0);
-static CMDS: Mutex<Vec<Cmd>> = Mutex::new(Vec::new());
+/// Queued commands with the epoch they were issued under (`None`: an unowned caller).
+static CMDS: Mutex<Vec<(Option<u64>, Cmd)>> = Mutex::new(Vec::new());
 static LEVEL: AtomicU32 = AtomicU32::new(0);
 static STARTED: OnceLock<()> = OnceLock::new();
 
@@ -136,6 +138,7 @@ pub fn show(text: &str, tone: Tone, hide_after: Option<Duration>) {
 }
 
 /// Changes the capsule but keeps the transcript on screen (e.g. "Transcribing…").
+#[cfg(debug_assertions)]
 pub fn status(text: &str, tone: Tone, hide_after: Option<Duration>) {
     send(Cmd::Show {
         text: text.to_string(),
@@ -146,22 +149,21 @@ pub fn status(text: &str, tone: Tone, hide_after: Option<Duration>) {
 }
 
 /// The live transcript so far: settled text and the interim tail.
+#[cfg(debug_assertions)]
 pub fn words(finals: &str, interim: &str) {
     send(Cmd::Words(finals.to_string(), interim.to_string()));
 }
 
 /// Recording stops `after` from now; the capsule counts down the last seconds.
+#[cfg(debug_assertions)]
 pub fn limit(after: Duration) {
     send(Cmd::Limit(Instant::now() + after));
 }
 
 /// The text landed: a check, then fade out.
+#[cfg(debug_assertions)]
 pub fn done() {
     send(Cmd::Done);
-}
-
-pub fn hide() {
-    send(Cmd::Hide);
 }
 
 /// Microphone RMS (0..1) of the latest audio; drives the waveform. Cheap: no message.
@@ -169,7 +171,33 @@ pub fn level(rms: f32) {
     LEVEL.store(rms.to_bits(), Ordering::Relaxed);
 }
 
+/// A presentation from the core: dropped by the overlay if a newer owner has the HUD.
+pub fn present(p: OwnedPresentation) {
+    let cmd = match p.command {
+        HudCommand::Show {
+            text,
+            tone,
+            hide_after,
+            clear,
+        } => Cmd::Show {
+            text,
+            tone,
+            hide_after,
+            clear,
+        },
+        HudCommand::Words(f, i) => Cmd::Words(f, i),
+        HudCommand::Limit(after) => Cmd::Limit(Instant::now() + after),
+        HudCommand::Done => Cmd::Done,
+        HudCommand::Hide => Cmd::Hide,
+    };
+    send_owned(Some(p.epoch), cmd);
+}
+
 fn send(cmd: Cmd) {
+    send_owned(None, cmd);
+}
+
+fn send_owned(epoch: Option<u64>, cmd: Cmd) {
     STARTED.get_or_init(|| {
         let (tx, rx) = std::sync::mpsc::channel();
         std::thread::Builder::new()
@@ -178,7 +206,9 @@ fn send(cmd: Cmd) {
             .expect("spawn overlay thread");
         let _ = rx.recv();
     });
-    CMDS.lock().unwrap_or_else(|e| e.into_inner()).push(cmd);
+    CMDS.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((epoch, cmd));
     let hwnd = HWND_VAL.load(Ordering::Acquire);
     if hwnd != 0 {
         // SAFETY: posting to our overlay window.
@@ -236,8 +266,17 @@ fn run(ready: std::sync::mpsc::Sender<()>) {
         }
         let _ = ready.send(());
         let mut msg = MSG::default();
-        while GetMessageW(&mut msg, None, 0, 0).as_bool() {
-            DispatchMessageW(&msg);
+        loop {
+            match super::classify_get_message(GetMessageW(&mut msg, None, 0, 0).0) {
+                super::Pump::Error => {
+                    log::error!("overlay message loop: GetMessageW failed");
+                    break;
+                }
+                super::Pump::Quit => break,
+                super::Pump::Message => {
+                    DispatchMessageW(&msg);
+                }
+            }
         }
     }
 }
@@ -257,16 +296,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
     match msg {
         WM_APP_UPDATE => with_hud(|hud| {
             let cmds = std::mem::take(&mut *CMDS.lock().unwrap_or_else(|e| e.into_inner()));
-            for cmd in cmds {
-                hud.apply(cmd);
+            for (epoch, cmd) in cmds {
+                hud.apply(epoch, cmd);
             }
             hud.frame();
         }),
         WM_TIMER if wparam.0 == FRAME_TIMER => with_hud(Hud::frame),
         WM_TIMER if wparam.0 == HIDE_TIMER => with_hud(|hud| {
-            hud.set_hide(None);
-            hud.shown = false;
-            hud.frame();
+            // A WM_TIMER queued before KillTimer still arrives: only the armed epoch hides.
+            if hud.hide.fire(hud.gate.current(), Instant::now()) {
+                hud.set_hide(None);
+                hud.shown = false;
+                hud.frame();
+            }
         }),
         WM_MOUSEACTIVATE => return LRESULT(MA_NOACTIVATE as isize),
         // SAFETY: default handling for everything else.
@@ -463,6 +505,8 @@ struct Hud {
     bars: [Spring; BARS],
     last: Instant,
     frame_ms: u32,
+    gate: EpochGate,
+    hide: HideTimer,
 }
 
 impl Hud {
@@ -491,6 +535,8 @@ impl Hud {
             bars: [Spring::at(0.0); BARS],
             last: now,
             frame_ms: 0,
+            gate: EpochGate::default(),
+            hide: HideTimer::default(),
         }
     }
 
@@ -498,7 +544,10 @@ impl Hud {
         (v as f32 * self.scale).round() as i32
     }
 
-    fn apply(&mut self, cmd: Cmd) {
+    fn apply(&mut self, epoch: Option<u64>, cmd: Cmd) {
+        if !self.gate.admit(epoch, matches!(cmd, Cmd::Show { .. })) {
+            return;
+        }
         let now = Instant::now();
         match cmd {
             Cmd::Show {
@@ -555,7 +604,8 @@ impl Hud {
         }
     }
 
-    fn set_hide(&self, after: Option<Duration>) {
+    fn set_hide(&mut self, after: Option<Duration>) {
+        self.hide.arm(self.gate.current(), Instant::now(), after);
         // SAFETY: timers on our own window, on its thread.
         unsafe {
             let _ = KillTimer(Some(self.hwnd), HIDE_TIMER);

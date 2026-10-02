@@ -45,14 +45,23 @@ impl Settings {
         }
     }
 
-    /// Writes via a temp file and rename so a crash can't leave half a file.
+    /// Writes via a temp file that is flushed to disk before it replaces the old one, so a
+    /// crash or a full disk leaves either the old settings or the new, never half a file.
+    /// The temp file is removed if any step fails.
     pub fn save(&self, path: &Path) -> std::io::Result<()> {
+        use std::io::Write;
         let tmp = path.with_extension("json.tmp");
-        std::fs::write(
-            &tmp,
-            serde_json::to_string_pretty(self).expect("settings serialize"),
-        )?;
-        std::fs::rename(tmp, path)
+        let text = serde_json::to_string_pretty(self).map_err(std::io::Error::other)?;
+        let write = || -> std::io::Result<()> {
+            let mut f = std::fs::File::create(&tmp)?;
+            f.write_all(text.as_bytes())?;
+            f.sync_all()?;
+            drop(f);
+            std::fs::rename(&tmp, path)
+        };
+        write().inspect_err(|_| {
+            let _ = std::fs::remove_file(&tmp);
+        })
     }
 
     pub fn chord(&self) -> Chord {
@@ -92,6 +101,37 @@ mod tests {
         std::fs::write(&path, "{nope").unwrap();
         assert_eq!(Settings::load(&path), Settings::default());
         assert!(path.with_extension("json.bad").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn failed_save_reports_the_error_and_leaves_the_old_file_and_no_temp() {
+        let dir = std::env::temp_dir().join(format!("dictap-settings-fail-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        let old = Settings {
+            sounds: false,
+            ..Settings::default()
+        };
+        old.save(&path).unwrap();
+        assert!(!path.with_extension("json.tmp").exists());
+
+        // The destination is a directory, so the final replace fails.
+        let blocked = dir.join("blocked.json");
+        std::fs::create_dir_all(blocked.join("child")).unwrap();
+        assert!(Settings::default().save(&blocked).is_err());
+        assert!(
+            !blocked.with_extension("json.tmp").exists(),
+            "temp file cleaned up"
+        );
+
+        // A missing parent folder fails up front.
+        assert!(
+            Settings::default()
+                .save(&dir.join("nope").join("s.json"))
+                .is_err()
+        );
+        assert_eq!(Settings::load(&path), old);
         std::fs::remove_dir_all(&dir).ok();
     }
 }

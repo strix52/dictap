@@ -164,10 +164,56 @@ pub fn repair(path: &Path) -> io::Result<u64> {
     Ok(duration_ms(data_len))
 }
 
-/// Reads a WAV file written by `WavSpool` (for batch retry).
-pub fn read_wav(path: &Path) -> io::Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    File::open(path)?.read_to_end(&mut bytes)?;
+#[derive(Debug)]
+pub enum WavError {
+    Io(io::Error),
+    TooLarge,
+    /// Not a finalized 16 kHz mono PCM16 file as written by `WavSpool`.
+    Unsupported,
+}
+
+impl std::fmt::Display for WavError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            WavError::Io(e) => write!(f, "{e}"),
+            WavError::TooLarge => f.write_str("recording is too large to send"),
+            WavError::Unsupported => f.write_str("recording isn't a finished 16 kHz WAV"),
+        }
+    }
+}
+
+/// Reads at most `max` bytes of a file. The size is checked up front (nothing is read from an
+/// oversize file) and again while reading, in case the file grows underneath us.
+pub fn read_file_bounded(path: &Path, max: usize) -> Result<Vec<u8>, WavError> {
+    let file = File::open(path).map_err(WavError::Io)?;
+    let len = file.metadata().map_err(WavError::Io)?.len();
+    if len > max as u64 {
+        return Err(WavError::TooLarge);
+    }
+    let mut bytes = Vec::with_capacity(len as usize);
+    file.take(max as u64 + 1)
+        .read_to_end(&mut bytes)
+        .map_err(WavError::Io)?;
+    if bytes.len() > max {
+        return Err(WavError::TooLarge);
+    }
+    Ok(bytes)
+}
+
+/// Reads a WAV file written by `WavSpool` for upload: bounded, and only if its header is
+/// exactly the one `WavSpool` writes for the file's real length (so a recovered or half-written
+/// file is rejected instead of sent).
+pub fn read_wav_bounded(path: &Path, max: usize) -> Result<Vec<u8>, WavError> {
+    let bytes = read_file_bounded(path, max)?;
+    let data = bytes
+        .len()
+        .checked_sub(HEADER_LEN as usize)
+        .filter(|n| n % 2 == 0)
+        .ok_or(WavError::Unsupported)?;
+    let data = u32::try_from(data).map_err(|_| WavError::Unsupported)?;
+    if bytes[..HEADER_LEN as usize] != header(data) {
+        return Err(WavError::Unsupported);
+    }
     Ok(bytes)
 }
 
@@ -232,13 +278,13 @@ mod tests {
         let mut w = WavSpool::create(&path).unwrap();
         w.write(&vec![100i16; 16_000]).unwrap(); // 1 s: triggers a patch
         w.write(&vec![100i16; 8_000]).unwrap(); // 0.5 s more: no patch yet
-        let bytes = read_wav(&path).unwrap();
+        let bytes = read_file_bounded(&path, 1 << 20).unwrap();
         assert_eq!(
             u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
             32_000
         );
         assert_eq!(w.finish().unwrap(), 1500);
-        let bytes = read_wav(&path).unwrap();
+        let bytes = read_file_bounded(&path, 1 << 20).unwrap();
         assert_eq!(bytes.len(), 44 + 48_000);
         assert_eq!(
             u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
@@ -254,11 +300,43 @@ mod tests {
         f.write_all(&[0u8; 3201]).unwrap();
         drop(f);
         assert_eq!(repair(&path).unwrap(), 1600);
-        let bytes = read_wav(&path).unwrap();
+        let bytes = read_file_bounded(&path, 1 << 20).unwrap();
         assert_eq!(
             u32::from_le_bytes(bytes[40..44].try_into().unwrap()),
             51_200
         );
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn bounded_reads_reject_oversize_and_unfinished_wavs() {
+        let dir = std::env::temp_dir().join(format!("dictap-wav-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("b.wav");
+        let mut w = WavSpool::create(&path).unwrap();
+        w.write(&vec![5i16; 1000]).unwrap();
+        // Header not patched yet: not a finished file.
+        assert!(matches!(
+            read_wav_bounded(&path, 1 << 20),
+            Err(WavError::Unsupported)
+        ));
+        w.finish().unwrap();
+        assert_eq!(read_wav_bounded(&path, 1 << 20).unwrap().len(), 44 + 2000);
+        // Exactly at the limit passes; one byte under it is too large.
+        assert!(read_wav_bounded(&path, 44 + 2000).is_ok());
+        assert!(matches!(
+            read_wav_bounded(&path, 44 + 1999),
+            Err(WavError::TooLarge)
+        ));
+        std::fs::write(dir.join("short.wav"), [0u8; 10]).unwrap();
+        assert!(matches!(
+            read_wav_bounded(&dir.join("short.wav"), 1 << 20),
+            Err(WavError::Unsupported)
+        ));
+        assert!(matches!(
+            read_wav_bounded(&dir.join("missing.wav"), 1 << 20),
+            Err(WavError::Io(_))
+        ));
         std::fs::remove_dir_all(&dir).ok();
     }
 }

@@ -78,7 +78,17 @@ pub fn start(target: HWND) -> windows::core::Result<()> {
             }
             let mut msg = MSG::default();
             // SAFETY: standard message loop on the thread that owns the hook.
-            while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+            loop {
+                // SAFETY: as above.
+                let got = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+                match super::classify_get_message(got) {
+                    super::Pump::Error => {
+                        log::error!("hook message loop: GetMessageW failed");
+                        break;
+                    }
+                    super::Pump::Quit => break,
+                    super::Pump::Message => {}
+                }
                 if msg.hwnd.is_invalid() && msg.message == WM_APP_REINSTALL {
                     if let Err(e) = install(target) {
                         log::error!("keyboard hook reinstall failed: {e}");

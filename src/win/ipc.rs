@@ -3,7 +3,7 @@
 //! until quit. The keyboard hook has its own thread (see `hook`).
 //! A second instance finds the window by class name and asks it to show history.
 
-use crate::event::{Event, PowerEvent, UiCmd};
+use crate::event::{Action, ActionRequest, Event, PowerEvent, RequestId};
 use std::cell::OnceCell;
 use std::sync::atomic::{AtomicIsize, Ordering};
 use std::sync::mpsc::Sender;
@@ -33,12 +33,13 @@ thread_local! {
     static TX: OnceCell<Sender<Event>> = const { OnceCell::new() };
 }
 
-pub(super) fn send(ev: Event) {
-    TX.with(|tx| {
-        if let Some(tx) = tx.get() {
-            let _ = tx.send(ev);
-        }
-    });
+/// Hands an event to the core. False if the core has gone away.
+pub(super) fn try_send(ev: Event) -> bool {
+    TX.with(|tx| tx.get().is_some_and(|tx| tx.send(ev).is_ok()))
+}
+
+fn send(ev: Event) {
+    let _ = try_send(ev);
 }
 
 fn post(msg: u32) -> bool {
@@ -120,7 +121,17 @@ pub fn run(tx: Sender<Event>) -> windows::core::Result<()> {
 
     let mut msg = MSG::default();
     // SAFETY: standard message loop on the thread that owns the window and hook.
-    while unsafe { GetMessageW(&mut msg, None, 0, 0) }.as_bool() {
+    loop {
+        // SAFETY: as above.
+        let got = unsafe { GetMessageW(&mut msg, None, 0, 0) }.0;
+        match super::classify_get_message(got) {
+            super::Pump::Error => {
+                log::error!("ipc message loop: GetMessageW failed");
+                break;
+            }
+            super::Pump::Quit => break,
+            super::Pump::Message => {}
+        }
         if super::app::pre_translate(&msg) {
             continue;
         }
@@ -167,7 +178,19 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         super::tray::WM_APP_TRAY => match super::tray::on_callback(hwnd, lparam) {
             super::tray::Action::History => super::app::show(super::app::Page::History),
             super::tray::Action::Settings => super::app::show(super::app::Page::Settings),
-            super::tray::Action::Autostart(on) => send(Event::Ui(UiCmd::SetAutostart(on))),
+            super::tray::Action::CopyLatest => send(Event::Ui(ActionRequest {
+                id: RequestId::next(),
+                window_generation: 0,
+                action: Action::CopyLatest,
+            })),
+            // The tray has no window to answer; generation 0 never matches one.
+            super::tray::Action::Autostart(on) => {
+                send(Event::Ui(ActionRequest {
+                    id: RequestId::next(),
+                    window_generation: 0,
+                    action: Action::SetAutostart(on),
+                }));
+            }
             super::tray::Action::Quit => send(Event::Quit),
             super::tray::Action::None => {}
         },

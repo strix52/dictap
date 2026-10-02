@@ -3,12 +3,13 @@
 //! the network.
 
 use crate::audio::{RATE, Resampler, WavSpool};
-use crate::event::{CaptureEvent, Event};
+use crate::event::{CaptureEvent, Event, SessionId};
 use cpal::traits::{DeviceTrait, HostTrait, StreamTrait};
 use std::collections::VecDeque;
-use std::path::PathBuf;
+use std::io;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, AtomicU32, Ordering};
-use std::sync::mpsc::{RecvTimeoutError, Sender, SyncSender, sync_channel};
+use std::sync::mpsc::{Receiver, RecvTimeoutError, Sender, SyncSender, sync_channel};
 use std::sync::{Arc, Condvar, Mutex};
 use std::time::Duration;
 
@@ -17,6 +18,24 @@ const QUEUE_CAP: usize = 15 * RATE as usize;
 
 /// At most one capture thread alive; a stuck open keeps this set until it returns.
 static BUSY: AtomicBool = AtomicBool::new(false);
+
+struct Reservation<'a> {
+    flag: &'a AtomicBool,
+    armed: bool,
+}
+impl Reservation<'_> {
+    fn release(&mut self) {
+        if self.armed {
+            self.armed = false;
+            self.flag.store(false, Ordering::Release);
+        }
+    }
+}
+impl Drop for Reservation<'_> {
+    fn drop(&mut self) {
+        self.release();
+    }
+}
 
 pub fn busy() -> bool {
     BUSY.load(Ordering::Acquire)
@@ -91,64 +110,156 @@ impl LiveQueue {
             Pop::Empty
         }
     }
+
+    /// Whether the queue overflowed (Live fell too far behind and lost audio).
+    #[cfg(test)]
+    pub fn overflowed(&self) -> bool {
+        self.lock().overflowed
+    }
 }
 
-/// Core's handle on a running capture.
+/// Whether the WAV a capture left behind can be used as it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum AudioState {
+    /// Header patched and file closed.
+    Finalized,
+    /// The writer is closed but the header wasn't patched: repair it, never delete it.
+    Recoverable,
+    /// No file was written.
+    Absent,
+}
+
+/// What a capture thread leaves behind. Sent exactly once, as the last thing it does.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CaptureReport {
+    pub duration_ms: u64,
+    /// Microphone chunks lost because the resampler/spool thread fell behind.
+    pub dropped_chunks: u32,
+    /// Set when capture ended on its own (unplugged device, write error) or never started.
+    pub problem: Option<String>,
+    pub audio: AudioState,
+}
+
+impl CaptureReport {
+    pub fn absent(problem: Option<String>) -> CaptureReport {
+        CaptureReport {
+            duration_ms: 0,
+            dropped_chunks: 0,
+            problem,
+            audio: AudioState::Absent,
+        }
+    }
+
+    /// Complete audio, nothing lost.
+    pub fn clean(&self) -> bool {
+        self.audio == AudioState::Finalized && self.problem.is_none() && self.dropped_chunks == 0
+    }
+}
+
+/// Core's handle on a running capture. Dropping it stops the capture (the thread still
+/// finalizes the WAV and reports); moving it between states does not.
 pub struct Capture {
     stop: Arc<AtomicBool>,
     pub queue: Arc<LiveQueue>,
 }
 
 impl Capture {
-    /// Stop recording. Before `Opened` this abandons the capture quietly (no events);
-    /// after it, the thread finalizes the WAV and sends `Ended`.
+    /// Stop recording. Idempotent. The thread finalizes whatever it has and sends `Finished`.
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Release);
     }
+
+    /// A handle with no thread behind it, plus an observer of its stop flag.
+    #[cfg(test)]
+    pub fn detached() -> (Capture, Arc<AtomicBool>) {
+        let stop = Arc::new(AtomicBool::new(false));
+        let cap = Capture {
+            stop: stop.clone(),
+            queue: Arc::new(LiveQueue::default()),
+        };
+        (cap, stop)
+    }
 }
 
-pub fn start(sid: u64, wav: PathBuf, events: Sender<Event>) -> Capture {
+impl Drop for Capture {
+    fn drop(&mut self) {
+        self.stop();
+    }
+}
+
+/// Starts the capture thread. `Err` means no thread exists (and nothing will be reported);
+/// the busy flag is only held by a running thread.
+pub fn start(id: SessionId, wav: PathBuf, events: Sender<Event>) -> io::Result<Capture> {
     let stop = Arc::new(AtomicBool::new(false));
     let queue = Arc::new(LiveQueue::default());
-    BUSY.store(true, Ordering::Release);
+    if BUSY
+        .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return Err(io::Error::other("a capture is still shutting down"));
+    }
     let (s, q) = (stop.clone(), queue.clone());
-    std::thread::Builder::new()
+    let spawned = std::thread::Builder::new()
         .name("capture".into())
         .spawn(move || {
-            struct Clear;
-            impl Drop for Clear {
-                fn drop(&mut self) {
-                    BUSY.store(false, Ordering::Release);
-                }
-            }
-            let _clear = Clear;
-            let send = |ev| {
-                let _ = events.send(Event::Capture { sid, ev });
+            let mut reservation = Reservation {
+                flag: &BUSY,
+                armed: true,
             };
-            if let Err(e) = run(&s, &q, &wav, &send) {
-                log::warn!("capture {sid}: {e}");
-                q.close();
-                if !s.load(Ordering::Acquire) {
-                    send(CaptureEvent::Failed(e));
-                }
-            }
-        })
-        .expect("spawn capture thread");
-    Capture { stop, queue }
+            let send = |ev| {
+                let _ = events.send(Event::Capture { session: id, ev });
+            };
+            let report = run(&s, &q, &wav, &send);
+            log::info!(
+                "capture {}: {} ms, dropped {}, audio {:?}, problem {:?}",
+                id.0,
+                report.duration_ms,
+                report.dropped_chunks,
+                report.audio,
+                report.problem
+            );
+            // Close the queue before reporting so Live drains and ends first.
+            q.close();
+            // Release the device claim first: by the time the core sees `Finished`, a new
+            // capture can start. (The guard remains as a backstop for a panic in `run`.)
+            reservation.release();
+            send(CaptureEvent::Finished(report));
+        });
+    match spawned {
+        Ok(_) => Ok(Capture { stop, queue }),
+        Err(e) => {
+            BUSY.store(false, Ordering::Release);
+            Err(e)
+        }
+    }
 }
 
-fn run(
-    stop: &AtomicBool,
-    queue: &LiveQueue,
-    wav: &std::path::Path,
-    send: &dyn Fn(CaptureEvent),
-) -> Result<(), String> {
+/// Everything opened before capturing starts.
+struct Open {
+    stream: cpal::Stream,
+    rx: Receiver<Vec<f32>>,
+    dropped: Arc<AtomicU32>,
+    fatal: Arc<Mutex<Option<String>>>,
+    rate: u32,
+    spool: WavSpool,
+}
+
+/// Opens the microphone and the spool. Checks `stop` between the steps so a cancel during
+/// startup unwinds without creating a file. `Err` is the finished report.
+fn open(stop: &AtomicBool, wav: &Path) -> Result<Open, CaptureReport> {
+    let fail = |e: String| CaptureReport::absent(Some(e));
+    let cancelled = || stop.load(Ordering::Acquire);
+    let quiet = || CaptureReport::absent(None);
+
     let device = cpal::default_host()
         .default_input_device()
-        .ok_or("No microphone")?;
+        .ok_or_else(|| fail("No microphone".into()))?;
+    if cancelled() {
+        return Err(quiet());
+    }
     let config = device
         .default_input_config()
-        .map_err(|e| format!("Microphone config: {e}"))?;
+        .map_err(|e| fail(format!("Microphone config: {e}")))?;
     let (rate, channels) = (config.sample_rate(), usize::from(config.channels()).max(1));
     log::info!(
         "capture: {} Hz, {channels} ch, {:?}",
@@ -187,15 +298,59 @@ fn run(
             timeout,
         ),
     }
-    .map_err(|e| format!("Microphone didn't open: {e}"))?;
+    .map_err(|e| fail(format!("Microphone didn't open: {e}")))?;
+    if cancelled() {
+        return Err(quiet());
+    }
     stream
         .play()
-        .map_err(|e| format!("Microphone didn't start: {e}"))?;
-
-    if stop.load(Ordering::Acquire) {
-        return Ok(()); // core gave up while we were opening
+        .map_err(|e| fail(format!("Microphone didn't start: {e}")))?;
+    if cancelled() {
+        return Err(quiet()); // core gave up while we were opening
     }
-    let mut spool = WavSpool::create(wav).map_err(|e| format!("Couldn't write audio: {e}"))?;
+    let spool = match WavSpool::create(wav) {
+        Ok(s) => s,
+        Err(e) => {
+            // A half-created file is the user's audio path: keep it for repair.
+            let audio = if wav.exists() {
+                AudioState::Recoverable
+            } else {
+                AudioState::Absent
+            };
+            return Err(CaptureReport {
+                audio,
+                ..fail(format!("Couldn't write audio: {e}"))
+            });
+        }
+    };
+    Ok(Open {
+        stream,
+        rx,
+        dropped,
+        fatal,
+        rate,
+        spool,
+    })
+}
+
+/// Records until stopped. After `Opened`, always returns a report for the spool it made.
+fn run(
+    stop: &AtomicBool,
+    queue: &LiveQueue,
+    wav: &Path,
+    send: &dyn Fn(CaptureEvent),
+) -> CaptureReport {
+    let Open {
+        stream,
+        rx,
+        dropped,
+        fatal,
+        rate,
+        mut spool,
+    } = match open(stop, wav) {
+        Ok(o) => o,
+        Err(report) => return report,
+    };
     send(CaptureEvent::Opened);
 
     let mut resampler = Resampler::new(rate);
@@ -211,52 +366,49 @@ fn run(
         Ok(())
     };
 
-    let mut reason = None;
+    let mut problem = None;
     while !stop.load(Ordering::Acquire) {
         if let Some(e) = fatal.lock().unwrap_or_else(|e| e.into_inner()).take() {
-            reason = Some(format!("Microphone stopped: {e}"));
+            problem = Some(format!("Microphone stopped: {e}"));
             break;
         }
         match rx.recv_timeout(Duration::from_millis(50)) {
             Ok(chunk) => {
                 if let Err(e) = take(&chunk, &mut spool) {
-                    reason = Some(e);
+                    problem = Some(e);
                     break;
                 }
             }
             Err(RecvTimeoutError::Timeout) => {}
             Err(RecvTimeoutError::Disconnected) => {
-                reason = Some("Microphone stopped".into());
+                problem = Some("Microphone stopped".into());
                 break;
             }
         }
     }
 
     drop(stream); // no more callbacks; drain what's buffered
-    while let Ok(chunk) = rx.try_recv() {
-        if reason.is_some() || take(&chunk, &mut spool).is_err() {
-            break;
+    while problem.is_none() {
+        let Ok(chunk) = rx.try_recv() else { break };
+        if let Err(e) = take(&chunk, &mut spool) {
+            problem = Some(e);
         }
     }
-    queue.close();
-    let duration_ms = match spool.finish() {
-        Ok(ms) => ms,
-        Err(e) => {
-            // After Opened core waits for a verdict, so always send one.
-            send(CaptureEvent::Failed(format!("Couldn't finish audio: {e}")));
-            return Ok(());
-        }
-    };
-    let dropped = dropped.load(Ordering::Relaxed);
-    if dropped > 0 {
-        log::warn!("capture: {dropped} chunks dropped");
+    let dropped_chunks = dropped.load(Ordering::Relaxed);
+    match spool.finish() {
+        Ok(duration_ms) => CaptureReport {
+            duration_ms,
+            dropped_chunks,
+            problem,
+            audio: AudioState::Finalized,
+        },
+        Err(e) => CaptureReport {
+            duration_ms: 0,
+            dropped_chunks,
+            problem: Some(problem.unwrap_or_else(|| format!("Couldn't finish audio: {e}"))),
+            audio: AudioState::Recoverable,
+        },
     }
-    send(CaptureEvent::Ended {
-        duration_ms,
-        dropped,
-        reason,
-    });
-    Ok(())
 }
 
 /// The cpal callback: averages channels to mono f32 and hands the chunk over.
@@ -294,7 +446,108 @@ mod tests {
 
         let q = LiveQueue::default();
         q.push(&vec![0; QUEUE_CAP]);
+        assert!(!q.overflowed());
         q.push(&[1]);
+        assert!(q.overflowed());
         assert!(matches!(q.pop(10, Duration::ZERO), Pop::Overflowed));
+    }
+
+    #[test]
+    fn dropping_a_capture_stops_it_but_moving_does_not() {
+        let (cap, stop) = Capture::detached();
+        let moved = Some(cap); // moved between states
+        assert!(!stop.load(Ordering::Acquire));
+        drop(moved);
+        assert!(stop.load(Ordering::Acquire));
+
+        let (cap, stop) = Capture::detached();
+        cap.stop();
+        cap.stop(); // idempotent
+        assert!(stop.load(Ordering::Acquire));
+    }
+
+    #[test]
+    fn report_cleanliness() {
+        let ok = CaptureReport {
+            duration_ms: 500,
+            dropped_chunks: 0,
+            problem: None,
+            audio: AudioState::Finalized,
+        };
+        assert!(ok.clean());
+        assert!(
+            !CaptureReport {
+                dropped_chunks: 1,
+                ..ok.clone()
+            }
+            .clean()
+        );
+        assert!(
+            !CaptureReport {
+                problem: Some("x".into()),
+                ..ok.clone()
+            }
+            .clean()
+        );
+        assert!(
+            !CaptureReport {
+                audio: AudioState::Recoverable,
+                ..ok
+            }
+            .clean()
+        );
+        assert!(!CaptureReport::absent(None).clean());
+    }
+    #[test]
+    fn old_reservation_drop_cannot_release_new_owner() {
+        let flag = AtomicBool::new(true);
+        let mut old = Reservation {
+            flag: &flag,
+            armed: true,
+        };
+        old.release();
+        assert!(
+            flag.compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_ok()
+        );
+        drop(old);
+        assert!(flag.load(Ordering::Acquire));
+        let next = Reservation {
+            flag: &flag,
+            armed: true,
+        };
+        drop(next);
+        assert!(!flag.load(Ordering::Acquire));
+    }
+    #[test]
+    #[ignore = "briefly opens the real default microphone, never uploads audio"]
+    fn microphone_start_stop_real() {
+        let path = std::env::temp_dir().join(format!(
+            "dictap-microphone-smoke-{}.wav",
+            std::process::id()
+        ));
+        let (tx, rx) = std::sync::mpsc::channel();
+        let cap = start(SessionId(1), path.clone(), tx).unwrap();
+        match rx.recv_timeout(Duration::from_secs(8)).unwrap() {
+            Event::Capture {
+                ev: CaptureEvent::Opened,
+                ..
+            } => {}
+            _ => panic!("microphone did not open"),
+        }
+        std::thread::sleep(Duration::from_millis(200));
+        cap.stop();
+        match rx.recv_timeout(Duration::from_secs(8)).unwrap() {
+            Event::Capture {
+                ev: CaptureEvent::Finished(report),
+                ..
+            } => {
+                assert!(report.problem.is_none(), "capture error");
+                assert_eq!(report.audio, AudioState::Finalized);
+            }
+            _ => panic!("capture did not stop"),
+        }
+        assert!(!busy());
+        std::fs::remove_file(path).unwrap();
     }
 }

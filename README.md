@@ -46,7 +46,8 @@ We built it after using [OpenWhispr](https://github.com/OpenWhispr/openwhispr) o
 
 - **Live transcript.** Words show in a small overlay as you speak. Audio streams to Gemini Live; if the stream fails, the recording is uploaded instead.
 - **History with Retry.** Each dictation is saved locally before it's pasted. Failed recordings are kept and can be retried with one click.
-- **Clipboard left alone.** dictap pastes via the clipboard, then restores what was there. Dictated text is kept out of <kbd>Win</kbd> + <kbd>V</kbd> history and cloud clipboard.
+- **Copy last transcription** from the tray menu if the text did not reach your text box.
+- **Clipboard left alone.** dictap pastes via the clipboard, then restores what was there when it safely can (best effort; if the clipboard changed meanwhile, your newer copy wins). Dictated text is kept out of <kbd>Win</kbd> + <kbd>V</kbd> history and cloud clipboard.
 - **Custom dictionary** for names and jargon (`Kubernetes`, `PostgreSQL`).
 - **Cancel** a slow transcription by pressing the hotkey twice. A countdown warns you before the 9:45 recording limit.
 - **API key in Windows Credential Manager**, not in a file.
@@ -81,7 +82,7 @@ dictap runs in the tray. Choose **No** at the install prompt, or pass `--portabl
 - No dictap servers, accounts or telemetry.
 - Audio goes from your PC to the provider (Google Gemini today) with your key, only while you're dictating. The microphone is closed otherwise.
 - History is a local SQLite file in `%APPDATA%\dictap`. You can set it to expire after 7, 30 or 90 days.
-- Recordings are deleted once transcribed. Failed ones stay in `%LOCALAPPDATA%\dictap` until you retry or delete them.
+- A recording is deleted once its transcript is confirmed complete. A live transcript is saved as *provisional* and its audio is kept (at most 20 files / 200 MiB) until you retry it. Failed recordings stay in `%LOCALAPPDATA%\dictap` until you retry or delete them.
 
 The provider's terms apply to the audio you send. Google may use data sent on the Gemini free tier to improve its products; paid keys are excluded.
 

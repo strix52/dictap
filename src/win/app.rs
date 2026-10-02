@@ -9,17 +9,25 @@
 //! The window carries WS_EX_DLGMODALFRAME: tiling managers such as komorebi leave those alone,
 //! so it always opens as an ordinary floating window.
 //!
-//! Reads history through its own read-only connection; every change goes to core as a `UiCmd`.
+//! Reads history through its own read-only connection; every change goes to core as an
+//! `ActionRequest` and is answered by exactly one `ActionResult`. Nothing is assumed to have
+//! worked: settings, dictionary, autostart and "Copied" change on screen only once the core
+//! says so, and a failed reply puts the on-screen value back from the durable source.
+//! Requests carry the window's generation, so a reply for a window that has since closed (and
+//! been reopened) is drained and dropped rather than applied to the new one.
 
 use super::ui;
-use crate::event::{Event, UiCmd};
+use crate::event::{
+    Action, ActionFailure, ActionRequest, ActionResult, ActionSuccess, Event, RequestId,
+};
 use crate::hotkey::Chord;
 use crate::settings::Settings;
 use crate::store::{self, Row, Store};
 use std::cell::{Cell, RefCell};
+use std::collections::{HashMap, VecDeque};
 use std::path::PathBuf;
-use std::sync::OnceLock;
-use std::sync::atomic::{AtomicIsize, Ordering};
+use std::sync::atomic::{AtomicIsize, AtomicU64, Ordering};
+use std::sync::{Mutex, OnceLock, PoisonError};
 use windows::Win32::Foundation::{COLORREF, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
 use windows::Win32::Graphics::Dwm::{
     DWMWA_BORDER_COLOR, DWMWA_CAPTION_COLOR, DWMWA_TEXT_COLOR, DWMWA_USE_IMMERSIVE_DARK_MODE,
@@ -68,11 +76,106 @@ const WM_APP_CHANGED: u32 = WM_APP + 10;
 /// Posted when an EDIT loses focus; wparam = its id. Deferred so the commit never runs
 /// re-entrantly inside another handler.
 const WM_APP_COMMIT: u32 = WM_APP + 11;
+/// Posted (from the core thread) when an `ActionResult` is waiting in `RESULTS`.
+const WM_APP_RESULT: u32 = WM_APP + 12;
+
+/// Requests the window may have unanswered at once; more are refused (and reverted) locally.
+const MAX_PENDING: usize = 16;
+/// Replies parked for the UI thread. Pending is capped lower, so only stale generations can
+/// ever fill it; the oldest are dropped first.
+const RESULT_QUEUE: usize = 32;
+
+/// Incremented every time the window is created.
+static GENERATION: AtomicU64 = AtomicU64::new(0);
+struct Replies {
+    reserved: Vec<(RequestId, u64)>,
+    queued: VecDeque<ActionResult>,
+}
+impl Replies {
+    fn reserve(&mut self, id: RequestId, generation: u64) -> bool {
+        if self.reserved.len() >= MAX_PENDING {
+            return false;
+        }
+        self.reserved.push((id, generation));
+        true
+    }
+    fn enqueue(&mut self, result: ActionResult) -> bool {
+        if !self
+            .reserved
+            .contains(&(result.id, result.window_generation))
+            || self.queued.iter().any(|r| r.id == result.id)
+        {
+            return false;
+        }
+        self.queued.push_back(result);
+        debug_assert!(self.queued.len() <= RESULT_QUEUE);
+        true
+    }
+    fn release(&mut self, id: RequestId) {
+        self.reserved.retain(|&(r, _)| r != id);
+    }
+    fn clear(&mut self) {
+        self.reserved.clear();
+        self.queued.clear();
+    }
+}
+static RESULTS: Mutex<Replies> = Mutex::new(Replies {
+    reserved: Vec::new(),
+    queued: VecDeque::new(),
+});
+
+/// What a pending request was for, so its reply can be applied or its optimism undone.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Pending {
+    Copy(i64),
+    Settings,
+    Dictionary,
+    Autostart,
+    Key,
+    TestKey,
+    Other,
+}
+
+struct PendingRequest {
+    kind: Pending,
+    draft: Option<String>,
+}
+
+fn same_kind(a: Pending, b: Pending) -> bool {
+    std::mem::discriminant(&a) == std::mem::discriminant(&b)
+}
+
+fn draft(kind: Pending, edits: Edits) -> Option<String> {
+    match kind {
+        Pending::Settings => Some(format!(
+            "{}\0{}",
+            ui::get_text(edits.hotkey),
+            ui::get_text(edits.language)
+        )),
+        Pending::Dictionary => Some(ui::get_text(edits.words)),
+        Pending::Key => Some(ui::get_text(edits.key)),
+        _ => None,
+    }
+}
+
+fn request_draft(a: &App, kind: Pending) -> Option<String> {
+    let field = draft(kind, a.edits);
+    if kind == Pending::Settings {
+        Some(format!(
+            "{}\0{}",
+            serde_json::to_string(&a.settings).unwrap_or_default(),
+            field.unwrap_or_default()
+        ))
+    } else {
+        field
+    }
+}
 
 const SEARCH_TIMER: usize = 1;
 const COPIED_TIMER: usize = 2;
 const ARM_TIMER: usize = 3;
 const NOTE_TIMER: usize = 4;
+const RESULT_TIMER: usize = 5;
 const LIMIT: usize = 5000;
 
 const ID_SEARCH: usize = 100;
@@ -586,7 +689,11 @@ struct App {
     autostart: bool,
     words: Vec<String>,
     hotkey_error: bool,
-    key_note: Option<&'static str>,
+    /// A message about the key and whether it is good news.
+    key_note: Option<(String, bool)>,
+    generation: u64,
+    pending: HashMap<RequestId, PendingRequest>,
+    action_note: Option<String>,
     set_view: R,
     set_h: f32,
     set_scroll: f32,
@@ -611,8 +718,191 @@ fn hwnd() -> Option<HWND> {
     (h != 0).then_some(HWND(h as *mut _))
 }
 
-fn send_core(cmd: UiCmd) {
-    super::ipc::send(Event::Ui(cmd));
+/// Sends `action` to the core and remembers what it was for. Returns false if it could not be
+/// sent (too many unanswered requests, or the core is gone); the caller then undoes any
+/// optimistic change.
+fn request(action: Action, kind: Pending) -> bool {
+    let Some(Some((id, window_generation))) = with(|a| {
+        if a.pending.len() >= MAX_PENDING || a.pending.values().any(|p| same_kind(p.kind, kind)) {
+            return None;
+        }
+        let id = RequestId::next();
+        if !RESULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .reserve(id, a.generation)
+        {
+            return None;
+        }
+        a.pending.insert(
+            id,
+            PendingRequest {
+                kind,
+                draft: request_draft(a, kind),
+            },
+        );
+        Some((id, a.generation))
+    }) else {
+        return false;
+    };
+    let sent = super::ipc::try_send(Event::Ui(ActionRequest {
+        id,
+        window_generation,
+        action,
+    }));
+    if !sent {
+        with(|a| a.pending.remove(&id));
+        RESULTS
+            .lock()
+            .unwrap_or_else(PoisonError::into_inner)
+            .release(id);
+    } else {
+        start_timer(RESULT_TIMER, 200);
+    }
+    sent
+}
+
+/// From the core thread: queue its answer for the window. Dropped if no window is open.
+pub fn reply(result: ActionResult) {
+    let Some(h) = hwnd() else { return };
+    {
+        let mut q = RESULTS.lock().unwrap_or_else(PoisonError::into_inner);
+        if !q.enqueue(result) {
+            return;
+        }
+    }
+    // SAFETY: a stale handle just fails; create() clears the queue for the next window.
+    let _ = unsafe { PostMessageW(Some(h), WM_APP_RESULT, WPARAM(0), LPARAM(0)) };
+}
+
+fn drain_results() {
+    let batch: Vec<ActionResult> = {
+        let mut replies = RESULTS.lock().unwrap_or_else(PoisonError::into_inner);
+        let batch: Vec<_> = replies.queued.drain(..).collect();
+        for r in &batch {
+            replies.release(r.id);
+        }
+        batch
+    };
+    for r in batch {
+        apply_result(r);
+    }
+    refresh();
+}
+
+fn set_key_note(text: impl Into<String>, good: bool) {
+    with(|a| a.key_note = Some((text.into(), good)));
+    start_timer(NOTE_TIMER, 5000);
+}
+
+fn apply_result(r: ActionResult) {
+    let Some(Some(kind)) = with(|a| {
+        (a.generation == r.window_generation)
+            .then(|| a.pending.remove(&r.id))
+            .flatten()
+    }) else {
+        return;
+    };
+    let unchanged = with(|a| request_draft(a, kind.kind) == kind.draft).unwrap_or(false);
+    if let Err(ActionFailure(why)) = &r.result {
+        with(|a| a.action_note = Some(why.clone()));
+        start_timer(NOTE_TIMER, 5000);
+    }
+    match (kind.kind, r.result) {
+        (Pending::Copy(row), Ok(_)) => {
+            with(|a| {
+                if a.sel
+                    .and_then(|s| a.rows.get(s))
+                    .is_some_and(|r| r.id == row)
+                {
+                    a.copied = true;
+                }
+            });
+            start_timer(COPIED_TIMER, 1400);
+        }
+        (Pending::Settings, Err(_)) if unchanged => revert(Pending::Settings),
+        (Pending::Dictionary, Err(_)) if unchanged => revert(Pending::Dictionary),
+        (Pending::Autostart, Err(_)) => revert(Pending::Autostart),
+        (Pending::Key, Ok(ActionSuccess::KeySaved { test_started: true })) => {
+            if unchanged && let Some(edit) = with(|a| a.edits.key) {
+                ui::set_text(edit, "");
+            }
+            set_key_note("Saved — checking it with Gemini…", true);
+        }
+        (Pending::Key, Ok(_)) => {
+            if unchanged && let Some(edit) = with(|a| a.edits.key) {
+                ui::set_text(edit, "");
+            }
+            set_key_note("Saved — not checked yet", true);
+        }
+        (Pending::Key, Err(ActionFailure(why))) => set_key_note(why, false),
+        (Pending::TestKey, Ok(_)) => set_key_note("Gemini key works", true),
+        (Pending::TestKey, Err(ActionFailure(why))) => set_key_note(why, false),
+        _ => {}
+    }
+    // Changes made while a save was pending are coalesced after its acknowledgment.
+    if !unchanged {
+        match kind.kind {
+            Pending::Settings => {
+                if let Some(newer) = with(|a| {
+                    let mut newer = a.settings.clone();
+                    if let Some(c) = Chord::parse(&ui::get_text(a.edits.hotkey)) {
+                        newer.hotkey = c.to_string();
+                    }
+                    newer.language = ui::get_text(a.edits.language).trim().to_string();
+                    a.settings = newer.clone();
+                    newer
+                }) {
+                    request(Action::SaveSettings(newer), Pending::Settings);
+                }
+            }
+            Pending::Dictionary => {
+                with(|a| a.words.clear());
+                commit(ID_WORDS);
+            }
+            _ => {}
+        }
+    }
+}
+
+/// Puts a field back to what is actually stored, after a refused or failed change.
+fn revert(kind: Pending) {
+    match kind {
+        Pending::Settings => {
+            let Some(Some(path)) = with(|_| PATHS.get().map(|p| p.0.clone())) else {
+                return;
+            };
+            let s = Settings::load(&path);
+            let Some(edits) = with(|a| {
+                a.settings = s.clone();
+                a.hotkey_error = false;
+                a.edits
+            }) else {
+                return;
+            };
+            ui::set_text(edits.hotkey, &s.hotkey);
+            ui::set_text(edits.language, &s.language);
+        }
+        Pending::Dictionary => {
+            let Some((words, edit)) = with(|a| {
+                let words = a
+                    .store
+                    .as_ref()
+                    .and_then(|s| s.dictionary().ok())
+                    .unwrap_or_else(|| a.words.clone());
+                a.words = words.clone();
+                (words, a.edits.words)
+            }) else {
+                return;
+            };
+            ui::set_text(edit, &words.join("\r\n"));
+        }
+        Pending::Autostart => {
+            with(|a| a.autostart = crate::autostart::enabled());
+        }
+        _ => {}
+    }
+    refresh();
 }
 
 /// Settings file and database paths.
@@ -1002,6 +1292,12 @@ fn create(page: Page) -> windows::core::Result<()> {
             None
         }
     };
+    // A new window is a new generation: replies still in flight for the old one are dropped.
+    let generation = GENERATION.fetch_add(1, Ordering::AcqRel) + 1;
+    RESULTS
+        .lock()
+        .unwrap_or_else(PoisonError::into_inner)
+        .clear();
     // SAFETY: a memory DC for measuring and painting, deleted on WM_DESTROY.
     let dc = unsafe { CreateCompatibleDC(None) };
     // SAFETY: plain setup of our DC.
@@ -1040,6 +1336,9 @@ fn create(page: Page) -> windows::core::Result<()> {
             words,
             hotkey_error: false,
             key_note: None,
+            generation,
+            pending: HashMap::new(),
+            action_note: None,
             set_view: R::default(),
             set_h: 0.0,
             set_scroll: 0.0,
@@ -1184,19 +1483,16 @@ fn start_timer(id: usize, ms: u32) {
 
 fn copy() {
     let Some(id) = with(|a| {
-        let r = a
-            .sel
+        a.sel
             .and_then(|i| a.rows.get(i))
-            .filter(|r| !r.text.is_empty())?;
-        a.copied = true;
-        Some(r.id)
+            .filter(|r| !r.text.is_empty())
+            .map(|r| r.id)
     })
     .flatten() else {
         return;
     };
-    send_core(UiCmd::Copy(id));
-    start_timer(COPIED_TIMER, 1400);
-    refresh();
+    // "Copied" appears only when the clipboard worker reports success.
+    request(Action::Copy(id), Pending::Copy(id));
 }
 
 fn delete() {
@@ -1210,7 +1506,7 @@ fn delete() {
         return;
     };
     if now {
-        send_core(UiCmd::Delete(id));
+        request(Action::Delete(id), Pending::Other);
     } else {
         start_timer(ARM_TIMER, 3000);
     }
@@ -1279,14 +1575,20 @@ fn clear_menu() {
 }
 
 fn save_settings(f: impl FnOnce(&mut Settings)) {
-    with(|a| {
+    let changed = with(|a| {
         let mut s = a.settings.clone();
         f(&mut s);
-        if s != a.settings {
+        (s != a.settings).then(|| {
             a.settings = s.clone();
-            send_core(UiCmd::SaveSettings(s));
-        }
-    });
+            s
+        })
+    })
+    .flatten();
+    if let Some(s) = changed
+        && !request(Action::SaveSettings(s), Pending::Settings)
+    {
+        with(|a| a.action_note = Some("Save pending — newer edits will follow".into()));
+    }
     refresh();
 }
 
@@ -1298,10 +1600,9 @@ fn save_key() {
     if key.trim().is_empty() {
         return;
     }
-    ui::set_text(key_edit, "");
-    send_core(UiCmd::SetApiKey(key.trim().to_string()));
-    with(|a| a.key_note = Some("Saved — checking it with Gemini…"));
-    start_timer(NOTE_TIMER, 5000);
+    if !request(Action::SetApiKey(key.trim().to_string()), Pending::Key) {
+        set_key_note("Couldn't send the key — try again", false);
+    }
     refresh();
 }
 
@@ -1343,8 +1644,9 @@ fn commit(id: usize) {
                 a.words = words.clone();
                 c
             });
-            if changed == Some(true) {
-                send_core(UiCmd::SetDictionary(words));
+            if changed == Some(true) && !request(Action::SetDictionary(words), Pending::Dictionary)
+            {
+                with(|a| a.action_note = Some("Save pending — newer edits will follow".into()));
             }
         }
         _ => {}
@@ -1363,7 +1665,7 @@ fn click(hit: Hit) {
                     .filter(|r| r.audio_path.is_some())
                     .map(|r| r.id)
             }) {
-                send_core(UiCmd::Retry(id));
+                request(Action::Retry(id), Pending::Other);
             }
         }
         Hit::ClearMenu => clear_menu(),
@@ -1371,7 +1673,7 @@ fn click(hit: Hit) {
             if let Some(Some(c)) = with(|a| a.clear.take())
                 && c.count > 0
             {
-                send_core(UiCmd::ClearBefore(c.cutoff));
+                request(Action::ClearBefore(c.cutoff), Pending::Other);
             }
             refresh();
         }
@@ -1385,14 +1687,22 @@ fn click(hit: Hit) {
             if let Some(on) = with(|a| {
                 a.autostart = !a.autostart;
                 a.autostart
-            }) {
-                send_core(UiCmd::SetAutostart(on));
+            }) && !request(Action::SetAutostart(on), Pending::Autostart)
+            {
+                revert(Pending::Autostart);
             }
             refresh();
         }
         Hit::SaveKey => save_key(),
-        Hit::TestKey => send_core(UiCmd::TestKey),
-        Hit::Import => send_core(UiCmd::ImportOpenWhispr),
+        Hit::TestKey => {
+            if !request(Action::TestKey, Pending::TestKey) {
+                set_key_note("Couldn't start the check — try again", false);
+                refresh();
+            }
+        }
+        Hit::Import => {
+            request(Action::ImportOpenWhispr, Pending::Other);
+        }
         Hit::List | Hit::Row(_) | Hit::Thumb | Hit::Field(_) => {}
     }
 }
@@ -1761,7 +2071,7 @@ impl App {
             LINE1,
         );
         p.text(
-            sub,
+            self.action_note.as_deref().unwrap_or(sub),
             self.fonts.get(F::Small),
             INK3,
             r(x, 60.0, 600.0, 18.0),
@@ -2258,8 +2568,9 @@ impl App {
         } else {
             ("Press once to start, again to stop and paste", INK3)
         };
-        let key_desc = match self.key_note {
-            Some(n) => (n, GREEN),
+        let key_note = self.key_note.clone();
+        let key_desc = match &key_note {
+            Some((n, good)) => (n.as_str(), if *good { GREEN } else { RED }),
             None => ("Stored in Windows Credential Manager, never on disk", INK3),
         };
         let keep = self.settings.keep_days;
@@ -2667,10 +2978,17 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_APP_COMMIT => commit(wparam.0),
         WM_APP_CHANGED => reload(false),
+        WM_APP_RESULT => drain_results(),
         WM_TIMER => {
             // SAFETY: our own timer.
             let _ = unsafe { KillTimer(Some(hwnd), wparam.0) };
             match wparam.0 {
+                RESULT_TIMER => {
+                    drain_results();
+                    if with(|a| !a.pending.is_empty()) == Some(true) {
+                        start_timer(RESULT_TIMER, 200);
+                    }
+                }
                 SEARCH_TIMER => reload(true),
                 COPIED_TIMER => {
                     with(|a| a.copied = false);
@@ -2681,7 +2999,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
                     refresh();
                 }
                 NOTE_TIMER => {
-                    with(|a| a.key_note = None);
+                    with(|a| {
+                        a.key_note = None;
+                        a.action_note = None;
+                    });
                     refresh();
                 }
                 _ => {}
@@ -2827,6 +3148,10 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         }
         WM_DESTROY => {
             HWND_.store(0, Ordering::Release);
+            RESULTS
+                .lock()
+                .unwrap_or_else(PoisonError::into_inner)
+                .clear();
             if let Some(pt) = PAINT.with(Cell::take) {
                 // SAFETY: the controls using them are gone.
                 unsafe {
@@ -2849,4 +3174,50 @@ unsafe extern "system" fn wndproc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: 
         _ => return unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
     }
     LRESULT(0)
+}
+
+#[cfg(test)]
+mod request_tests {
+    use super::*;
+    fn queue() -> Replies {
+        Replies {
+            reserved: Vec::new(),
+            queued: VecDeque::new(),
+        }
+    }
+    fn reply_for(id: RequestId, generation: u64) -> ActionResult {
+        ActionResult {
+            id,
+            window_generation: generation,
+            result: Ok(ActionSuccess::Copied),
+        }
+    }
+    #[test]
+    fn replies_reserve_capacity_and_reject_duplicates_or_stale_windows() {
+        let mut q = queue();
+        let ids: Vec<_> = (0..MAX_PENDING).map(|_| RequestId::next()).collect();
+        for &id in &ids {
+            assert!(q.reserve(id, 1));
+        }
+        assert!(!q.reserve(RequestId::next(), 1));
+        for &id in &ids {
+            assert!(q.enqueue(reply_for(id, 1)));
+        }
+        assert!(!q.enqueue(reply_for(ids[0], 1)));
+        assert_eq!(q.queued.len(), MAX_PENDING);
+        q.clear();
+        let newer = RequestId::next();
+        assert!(q.reserve(newer, 2));
+        assert!(!q.enqueue(reply_for(ids[0], 1)));
+        assert!(q.enqueue(reply_for(newer, 2)));
+        q.queued.clear();
+        q.release(newer);
+        assert!(q.reserved.is_empty());
+    }
+    #[test]
+    fn different_copy_rows_still_share_one_pending_action_kind() {
+        assert!(same_kind(Pending::Copy(1), Pending::Copy(2)));
+        assert!(same_kind(Pending::Settings, Pending::Settings));
+        assert!(!same_kind(Pending::Key, Pending::Settings));
+    }
 }

@@ -1,6 +1,6 @@
 [package]
 name = "dictap"
-version = "0.1.0"
+version = "0.1.1"
 edition = "2024"
 description = "Tiny Windows dictation: press a hotkey, talk, and your words are pasted where you type"
 license = "MIT"

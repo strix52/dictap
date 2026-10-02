@@ -1,12 +1,16 @@
 //! SQLite history, dictionary and meta. The core owns the only write connection;
 //! the UI opens its own read-only one.
 
+use crate::event::SessionId;
 use rusqlite::{Connection, OpenFlags, OptionalExtension, params};
 use std::path::Path;
 
 pub const OK: &str = "ok";
 pub const PROVISIONAL: &str = "provisional";
 pub const FAILED: &str = "failed";
+/// `source` of rows this app created itself; `source_id` is then the session id.
+pub const NATIVE: &str = "dictap";
+const TOMB: &str = "tomb:";
 
 const SCHEMA_V1: &str = "
 CREATE TABLE transcriptions (
@@ -41,7 +45,7 @@ pub struct Row {
     pub audio_path: Option<String>,
 }
 
-/// A row to insert. `source_id` is set only for imported rows.
+/// A row to insert.
 #[derive(Default)]
 pub struct NewRow<'a> {
     pub created_ms: i64,
@@ -98,6 +102,9 @@ impl Store {
         Ok(Store { conn })
     }
 
+    /// A row with no native identity (tests only; production rows go through
+    /// `insert_dictation_once`).
+    #[cfg(test)]
     pub fn insert(&self, r: &NewRow<'_>) -> rusqlite::Result<i64> {
         self.conn.execute(
             "INSERT INTO transcriptions (created_ms, text, duration_ms, model, status, error, audio_path)
@@ -105,6 +112,66 @@ impl Store {
             params![r.created_ms, r.text, r.duration_ms, r.model, r.status, r.error, r.audio_path],
         )?;
         Ok(self.conn.last_insert_rowid())
+    }
+
+    /// Inserts the row for a dictation session exactly once. Returns the row id and whether
+    /// this call created it; a duplicate completion finds the first row and changes nothing.
+    pub fn insert_dictation_once(
+        &self,
+        session: SessionId,
+        r: &NewRow<'_>,
+    ) -> rusqlite::Result<(i64, bool)> {
+        self.insert_dictation_with_audio_rule(session, r, false)
+    }
+
+    pub fn insert_dictation_with_audio_rule(
+        &self,
+        session: SessionId,
+        r: &NewRow<'_>,
+        keep_audio: bool,
+    ) -> rusqlite::Result<(i64, bool)> {
+        let tx = self.conn.unchecked_transaction()?;
+        let sid = session_i64(session)?;
+        let n = tx.execute(
+            "INSERT INTO transcriptions (created_ms, text, duration_ms, model, status, error, audio_path, source, source_id)
+             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)
+             ON CONFLICT(source, source_id) DO NOTHING",
+            params![
+                r.created_ms,
+                r.text,
+                r.duration_ms,
+                r.model,
+                r.status,
+                r.error,
+                r.audio_path,
+                NATIVE,
+                sid
+            ],
+        )?;
+        if n == 1 {
+            let row = tx.last_insert_rowid();
+            if keep_audio {
+                tx.execute(
+                    "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, 'keep')",
+                    [format!("audio-rule:{sid}")],
+                )?;
+            }
+            tx.commit()?;
+            return Ok((row, true));
+        }
+        let id = tx.query_row(
+            "SELECT id FROM transcriptions WHERE source = ?1 AND source_id = ?2",
+            params![NATIVE, sid],
+            |r| r.get(0),
+        )?;
+        tx.commit()?;
+        Ok((id, false))
+    }
+
+    pub fn tombstone_audio(&self, path: &Path) -> rusqlite::Result<()> {
+        let tx = self.conn.unchecked_transaction()?;
+        write_tomb(&tx, path)?;
+        tx.commit()
     }
 
     /// Imported row; returns false if it was already imported.
@@ -122,6 +189,67 @@ impl Store {
         Ok(n == 1)
     }
 
+    pub fn native_row(&self, session: SessionId) -> rusqlite::Result<Option<Row>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {COLS} FROM transcriptions WHERE source = ?1 AND source_id = ?2"),
+                params![NATIVE, session_i64(session)?],
+                row,
+            )
+            .optional()
+    }
+
+    /// The highest native session id ever stored (0 if none): the allocator's floor.
+    pub fn max_native_session(&self) -> rusqlite::Result<i64> {
+        self.conn.query_row(
+            "SELECT COALESCE(MAX(source_id), 0) FROM transcriptions WHERE source = ?1",
+            [NATIVE],
+            |r| r.get(0),
+        )
+    }
+
+    /// The row whose kept audio is exactly this path.
+    pub fn row_for_audio(&self, path: &Path) -> rusqlite::Result<Option<Row>> {
+        self.conn
+            .query_row(
+                &format!("SELECT {COLS} FROM transcriptions WHERE audio_path = ?1 LIMIT 1"),
+                [path_str(path)],
+                row,
+            )
+            .optional()
+    }
+
+    /// Points a row at the file's new location, only if it still points at `expected`.
+    pub fn set_audio_path(
+        &self,
+        id: i64,
+        expected: &Path,
+        actual: &Path,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE transcriptions SET audio_path = ?3 WHERE id = ?1 AND audio_path = ?2",
+            params![id, path_str(expected), path_str(actual)],
+        )?;
+        Ok(n == 1)
+    }
+
+    pub fn clear_audio_if_matches(&self, id: i64, expected: &Path) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE transcriptions SET audio_path = NULL WHERE id = ?1 AND audio_path = ?2",
+            params![id, path_str(expected)],
+        )?;
+        Ok(n == 1)
+    }
+
+    /// Reattaches an existing file to a row that has lost its reference.
+    pub fn link_audio_if_unset(&self, id: i64, path: &Path) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE transcriptions SET audio_path = ?2 WHERE id = ?1 AND audio_path IS NULL",
+            params![id, path_str(path)],
+        )?;
+        Ok(n == 1)
+    }
+
     pub fn set_paste(&self, id: i64, paste: &str) -> rusqlite::Result<()> {
         self.conn.execute(
             "UPDATE transcriptions SET paste = ?2 WHERE id = ?1",
@@ -130,20 +258,59 @@ impl Store {
         Ok(())
     }
 
-    /// Records a retry outcome. Text is only replaced when the retry produced some.
-    pub fn set_result(
+    /// A successful Retry: new text and model, audio released. Applies only while the row
+    /// still holds the audio the Retry read, and leaves a tombstone for that file so a crash
+    /// before its deletion cannot turn it back into a recovered dictation. Returns whether
+    /// the row was updated.
+    pub fn apply_retry(
+        &mut self,
+        id: i64,
+        expected_audio: &Path,
+        text: &str,
+        model: &str,
+    ) -> rusqlite::Result<bool> {
+        let tx = self.conn.transaction()?;
+        let n = tx.execute(
+            "UPDATE transcriptions SET text = ?3, model = ?4, status = ?5, error = NULL, audio_path = NULL
+             WHERE id = ?1 AND audio_path = ?2",
+            params![id, path_str(expected_audio), text, model, OK],
+        )?;
+        if n == 1 {
+            write_tomb(&tx, expected_audio)?;
+        }
+        tx.commit()?;
+        Ok(n == 1)
+    }
+
+    /// A failed Retry: keep text, status and audio, record why.
+    pub fn set_retry_error(
         &self,
         id: i64,
-        text: Option<&str>,
-        status: &str,
-        error: Option<&str>,
-        audio_path: Option<&str>,
-    ) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE transcriptions SET text = COALESCE(?2, text), status = ?3, error = ?4, audio_path = ?5 WHERE id = ?1",
-            params![id, text, status, error, audio_path],
+        expected_audio: &Path,
+        error: &str,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE transcriptions SET error = ?3 WHERE id = ?1 AND audio_path = ?2",
+            params![id, path_str(expected_audio), error],
         )?;
-        Ok(())
+        Ok(n == 1)
+    }
+
+    /// Late text for a dictation that was already stored empty (cancelled or timed out).
+    /// Never overwrites text; the row becomes provisional because nothing confirmed it.
+    pub fn apply_late_text(
+        &self,
+        id: i64,
+        text: &str,
+        model: &str,
+        error: Option<&str>,
+    ) -> rusqlite::Result<bool> {
+        let n = self.conn.execute(
+            "UPDATE transcriptions SET text = ?2, model = ?3, status = ?4, error = ?5
+             WHERE id = ?1 AND text = ''",
+            params![id, text, model, PROVISIONAL, error],
+        )?;
+        Ok(n == 1)
     }
 
     pub fn get(&self, id: i64) -> rusqlite::Result<Option<Row>> {
@@ -154,6 +321,13 @@ impl Store {
                 row,
             )
             .optional()
+    }
+
+    pub fn latest_text(&self) -> rusqlite::Result<Option<Row>> {
+        self.conn.query_row(
+            &format!("SELECT {COLS} FROM transcriptions WHERE trim(text) != '' ORDER BY created_ms DESC, id DESC LIMIT 1"),
+            [], row,
+        ).optional()
     }
 
     /// Newest first. An empty query lists everything.
@@ -168,10 +342,12 @@ impl Store {
             .collect()
     }
 
-    /// Deletes a row, returning its kept audio path (the caller deletes the file).
-    pub fn delete(&self, id: i64) -> rusqlite::Result<Option<String>> {
-        let path: Option<String> = self
-            .conn
+    /// Deletes a row and, in the same transaction, tombstones its kept audio so restart
+    /// recovery cannot resurrect it. Returns the audio path (the caller deletes the file,
+    /// then clears the tombstone).
+    pub fn delete(&mut self, id: i64) -> rusqlite::Result<Option<String>> {
+        let tx = self.conn.transaction()?;
+        let path: Option<String> = tx
             .query_row(
                 "SELECT audio_path FROM transcriptions WHERE id = ?1",
                 [id],
@@ -179,8 +355,11 @@ impl Store {
             )
             .optional()?
             .flatten();
-        self.conn
-            .execute("DELETE FROM transcriptions WHERE id = ?1", [id])?;
+        if let Some(p) = &path {
+            write_tomb(&tx, Path::new(p))?;
+        }
+        tx.execute("DELETE FROM transcriptions WHERE id = ?1", [id])?;
+        tx.commit()?;
         Ok(path)
     }
 
@@ -193,21 +372,43 @@ impl Store {
         )
     }
 
-    /// Deletes rows created before `cutoff_ms`, returning their kept audio paths (the
-    /// caller deletes the files).
-    pub fn delete_before(&self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
-        let paths = self
-            .conn
+    /// Deletes rows created before `cutoff_ms`, tombstoning their kept audio in the same
+    /// transaction, and returns those paths (the caller deletes the files).
+    pub fn delete_before(&mut self, cutoff_ms: i64) -> rusqlite::Result<Vec<String>> {
+        let tx = self.conn.transaction()?;
+        let paths = tx
             .prepare(
                 "SELECT audio_path FROM transcriptions WHERE created_ms < ?1 AND audio_path IS NOT NULL",
             )?
             .query_map([cutoff_ms], |r| r.get(0))?
             .collect::<rusqlite::Result<Vec<String>>>()?;
-        self.conn.execute(
+        for p in &paths {
+            write_tomb(&tx, Path::new(p))?;
+        }
+        tx.execute(
             "DELETE FROM transcriptions WHERE created_ms < ?1",
             [cutoff_ms],
         )?;
+        tx.commit()?;
         Ok(paths)
+    }
+
+    /// Files whose rows were deleted but whose removal hasn't been confirmed: (stem, path).
+    pub fn tombstones(&self) -> rusqlite::Result<Vec<(String, String)>> {
+        let mut stmt = self
+            .conn
+            .prepare("SELECT key, value FROM meta WHERE key LIKE 'tomb:%'")?;
+        stmt.query_map([], |r| {
+            let key: String = r.get(0)?;
+            Ok((key[TOMB.len()..].to_string(), r.get(1)?))
+        })?
+        .collect()
+    }
+
+    pub fn clear_tombstone(&self, stem: &str) -> rusqlite::Result<()> {
+        self.conn
+            .execute("DELETE FROM meta WHERE key = ?1", [format!("{TOMB}{stem}")])?;
+        Ok(())
     }
 
     /// Rows holding kept audio, oldest first (for retention).
@@ -217,14 +418,6 @@ impl Store {
         )?;
         stmt.query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
             .collect()
-    }
-
-    pub fn clear_audio(&self, id: i64) -> rusqlite::Result<()> {
-        self.conn.execute(
-            "UPDATE transcriptions SET audio_path = NULL WHERE id = ?1",
-            [id],
-        )?;
-        Ok(())
     }
 
     pub fn dictionary(&self) -> rusqlite::Result<Vec<String>> {
@@ -286,6 +479,26 @@ impl Store {
     }
 }
 
+fn session_i64(session: SessionId) -> rusqlite::Result<i64> {
+    i64::try_from(session.0).map_err(|e| rusqlite::Error::ToSqlConversionFailure(Box::new(e)))
+}
+
+fn path_str(p: &Path) -> String {
+    p.to_string_lossy().into_owned()
+}
+
+/// Records that the file at `path` belongs to a deleted row, keyed by its file stem.
+fn write_tomb(conn: &Connection, path: &Path) -> rusqlite::Result<()> {
+    let Some(stem) = path.file_stem().and_then(|s| s.to_str()) else {
+        return Ok(());
+    };
+    conn.execute(
+        "INSERT OR REPLACE INTO meta (key, value) VALUES (?1, ?2)",
+        params![format!("{TOMB}{stem}"), path_str(path)],
+    )?;
+    Ok(())
+}
+
 /// Escapes `%`, `_` and `\` for `LIKE … ESCAPE '\'`.
 pub fn like_escape(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -299,19 +512,22 @@ pub fn like_escape(s: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {
+pub mod tests {
     use super::*;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
 
-    fn temp_store() -> (Store, std::path::PathBuf) {
+    /// A fresh store in its own temp directory (returned so callers can put files beside it).
+    pub fn temp_store() -> (Store, PathBuf) {
+        static N: AtomicU32 = AtomicU32::new(0);
         let dir = std::env::temp_dir().join(format!(
-            "dictap-store-{}-{:?}",
+            "dictap-store-{}-{}",
             std::process::id(),
-            std::thread::current().id()
+            N.fetch_add(1, Ordering::Relaxed)
         ));
+        let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("t.db");
-        let _ = std::fs::remove_file(&path);
-        (Store::open(&path).unwrap(), path)
+        (Store::open(&dir.join("t.db")).unwrap(), dir)
     }
 
     fn new(text: &str, created_ms: i64) -> NewRow<'_> {
@@ -325,7 +541,7 @@ mod tests {
 
     #[test]
     fn insert_search_delete() {
-        let (s, path) = temp_store();
+        let (mut s, dir) = temp_store();
         let a = s.insert(&new("hello world", 1)).unwrap();
         s.insert(&new("100% sure_thing", 2)).unwrap();
         let f = s
@@ -354,15 +570,9 @@ mod tests {
             Some("attempted")
         );
         assert_eq!(s.kept_audio().unwrap(), vec![(f, "x.wav".to_string())]);
-        s.set_result(f, Some("recovered"), OK, None, None).unwrap();
-        let r = s.get(f).unwrap().unwrap();
-        assert_eq!(
-            (r.text.as_str(), r.status.as_str(), r.audio_path),
-            ("recovered", OK, None)
-        );
         assert_eq!(s.delete(a).unwrap(), None);
         assert!(s.get(a).unwrap().is_none());
-        let reader = Store::open_read(&path).unwrap();
+        let reader = Store::open_read(&dir.join("t.db")).unwrap();
         assert_eq!(reader.search("", 10).unwrap().len(), 2);
     }
 
@@ -386,5 +596,128 @@ mod tests {
         });
         assert!(r.is_err());
         assert_eq!(s.search("rolled", 10).unwrap().len(), 0);
+    }
+
+    #[test]
+    fn native_insert_is_once_and_never_overwrites() {
+        let (s, _) = temp_store();
+        let id = SessionId(1_700_000_000_000);
+        let (a, fresh) = s.insert_dictation_once(id, &new("first", 5)).unwrap();
+        assert!(fresh);
+        let (b, fresh) = s.insert_dictation_once(id, &new("second", 5)).unwrap();
+        assert!(!fresh);
+        assert_eq!(a, b);
+        assert_eq!(s.get(a).unwrap().unwrap().text, "first");
+        assert_eq!(s.native_row(id).unwrap().unwrap().id, a);
+        assert_eq!(s.max_native_session().unwrap(), 1_700_000_000_000);
+        assert!(s.native_row(SessionId(3)).unwrap().is_none());
+        assert!(
+            s.insert_dictation_once(SessionId(u64::MAX), &new("x", 1))
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn audio_path_updates_are_guarded() {
+        let (s, _) = temp_store();
+        let (a, b) = (Path::new("a.wav"), Path::new("b.wav"));
+        let (id, _) = s
+            .insert_dictation_once(
+                SessionId(9),
+                &NewRow {
+                    audio_path: Some("a.wav"),
+                    ..new("t", 1)
+                },
+            )
+            .unwrap();
+        assert_eq!(s.row_for_audio(a).unwrap().unwrap().id, id);
+        assert!(
+            !s.set_audio_path(id, b, a).unwrap(),
+            "expected path differs"
+        );
+        assert!(s.set_audio_path(id, a, b).unwrap());
+        assert!(!s.clear_audio_if_matches(id, a).unwrap());
+        assert!(s.clear_audio_if_matches(id, b).unwrap());
+        assert!(s.link_audio_if_unset(id, a).unwrap());
+        assert!(!s.link_audio_if_unset(id, b).unwrap(), "already linked");
+    }
+
+    #[test]
+    fn delete_tombstones_audio_atomically() {
+        let (mut s, _) = temp_store();
+        let id = s
+            .insert(&NewRow {
+                audio_path: Some("failed/123.wav"),
+                status: FAILED,
+                ..new("", 1)
+            })
+            .unwrap();
+        assert_eq!(s.delete(id).unwrap().as_deref(), Some("failed/123.wav"));
+        assert_eq!(
+            s.tombstones().unwrap(),
+            [("123".to_string(), "failed/123.wav".to_string())]
+        );
+        s.clear_tombstone("123").unwrap();
+        assert!(s.tombstones().unwrap().is_empty());
+        let id = s
+            .insert(&NewRow {
+                audio_path: Some("failed/5.wav"),
+                status: FAILED,
+                ..new("", 1)
+            })
+            .unwrap();
+        s.insert(&new("newer", 100)).unwrap();
+        assert_eq!(s.delete_before(50).unwrap(), ["failed/5.wav"]);
+        assert!(s.get(id).unwrap().is_none());
+        assert_eq!(s.tombstones().unwrap().len(), 1);
+    }
+
+    #[test]
+    fn retry_applies_only_to_the_audio_it_read() {
+        let (mut s, _) = temp_store();
+        let wav = Path::new("failed/7.wav");
+        let id = s
+            .insert(&NewRow {
+                audio_path: Some("failed/7.wav"),
+                status: FAILED,
+                ..new("", 1)
+            })
+            .unwrap();
+        assert!(!s.apply_retry(id, Path::new("other.wav"), "t", "m").unwrap());
+        assert!(s.set_retry_error(id, wav, "offline").unwrap());
+        assert!(s.apply_retry(id, wav, "hello", "m").unwrap());
+        let r = s.get(id).unwrap().unwrap();
+        assert_eq!(
+            (r.text.as_str(), r.status.as_str(), r.model.as_deref()),
+            ("hello", OK, Some("m"))
+        );
+        assert_eq!((r.error, r.audio_path), (None, None));
+        assert_eq!(s.tombstones().unwrap().len(), 1, "file deletion is owed");
+        assert!(!s.apply_retry(id, wav, "again", "m").unwrap());
+        s.delete(id).unwrap();
+        assert!(
+            !s.apply_retry(id, wav, "late", "m").unwrap(),
+            "no resurrection"
+        );
+    }
+
+    #[test]
+    fn late_text_never_overwrites() {
+        let (s, _) = temp_store();
+        let (id, _) = s
+            .insert_dictation_once(
+                SessionId(4),
+                &NewRow {
+                    status: FAILED,
+                    error: Some("Cancelled"),
+                    ..new("", 1)
+                },
+            )
+            .unwrap();
+        assert!(s.apply_late_text(id, "words", "m", None).unwrap());
+        let r = s.get(id).unwrap().unwrap();
+        assert_eq!((r.text.as_str(), r.status.as_str()), ("words", PROVISIONAL));
+        assert!(!s.apply_late_text(id, "other", "m", None).unwrap());
+        assert_eq!(s.get(id).unwrap().unwrap().text, "words");
     }
 }

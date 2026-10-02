@@ -2,8 +2,7 @@
 
 use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND};
 use windows::Win32::Security::{
-    GetSidSubAuthority, GetSidSubAuthorityCount, GetTokenInformation, TOKEN_MANDATORY_LABEL,
-    TOKEN_QUERY, TokenIntegrityLevel,
+    GetTokenInformation, TOKEN_MANDATORY_LABEL, TOKEN_QUERY, TokenIntegrityLevel,
 };
 use windows::Win32::System::Threading::{
     AttachThreadInput, GetCurrentProcess, GetCurrentThreadId, OpenProcess, OpenProcessToken,
@@ -36,7 +35,7 @@ pub fn exists(w: Window) -> bool {
     unsafe { IsWindow(Some(w.hwnd())) }.as_bool()
 }
 
-fn pid_and_thread(w: Window) -> (u32, u32) {
+pub fn pid_and_thread(w: Window) -> (u32, u32) {
     let mut pid = 0;
     // SAFETY: valid out-pointer.
     let tid = unsafe { GetWindowThreadProcessId(w.hwnd(), Some(&mut pid)) };
@@ -54,13 +53,21 @@ pub fn class_name(w: Window) -> String {
     String::from_utf16_lossy(&buf[..n.max(0) as usize])
 }
 
+/// Owns a process or token handle and closes it on every path.
+struct OwnedHandle(HANDLE);
+
+impl Drop for OwnedHandle {
+    fn drop(&mut self) {
+        // SAFETY: the wrapper is the sole owner of a handle that opened successfully.
+        let _ = unsafe { CloseHandle(self.0) };
+    }
+}
+
 fn with_process<T>(pid: u32, f: impl FnOnce(HANDLE) -> Option<T>) -> Option<T> {
-    // SAFETY: handle is closed below.
-    let process = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?;
-    let out = f(process);
-    // SAFETY: we own the handle.
-    let _ = unsafe { CloseHandle(process) };
-    out
+    // SAFETY: the handle is owned (and closed) by the guard below.
+    let process =
+        OwnedHandle(unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid) }.ok()?);
+    f(process.0)
 }
 
 /// Lower-case exe file name of the window's process.
@@ -83,40 +90,116 @@ pub fn exe_name(w: Window) -> Option<String> {
     })
 }
 
-fn integrity_of(process: HANDLE) -> Option<u32> {
-    let mut token = HANDLE::default();
-    // SAFETY: valid out-pointer; token closed below.
-    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }.ok()?;
-    let mut buf = [0u8; 64];
-    let mut len = 0;
-    // SAFETY: buffer is valid; on success it holds a TOKEN_MANDATORY_LABEL whose SID points inside it.
-    let level = unsafe {
-        let ok = GetTokenInformation(
-            token,
-            TokenIntegrityLevel,
-            Some(buf.as_mut_ptr().cast()),
-            buf.len() as u32,
-            &mut len,
-        );
-        let _ = CloseHandle(token);
-        ok.ok()?;
-        let label = &*(buf.as_ptr() as *const TOKEN_MANDATORY_LABEL);
-        let count = *GetSidSubAuthorityCount(label.Label.Sid);
-        *GetSidSubAuthority(label.Label.Sid, u32::from(count) - 1)
-    };
-    Some(level)
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub struct IntegrityLevel(pub u32);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegrityError {
+    OpenToken,
+    Query,
+    /// The returned structure did not describe a complete, in-bounds SID.
+    Malformed,
 }
 
-/// True if the window's process runs at a higher integrity level than us (SendInput can't
-/// reach it). If we can't even read its token, it's treated as elevated.
-pub fn is_elevated(w: Window) -> bool {
+/// Upper bound for the label we are willing to allocate (a mandatory label holds one SID of
+/// at most 68 bytes, so this is generous).
+const TOKEN_LABEL_MAX: usize = 1024;
+
+/// Reads the integrity RID out of a `TOKEN_MANDATORY_LABEL` blob. `buf` is the filled part of
+/// the query buffer. The SID pointer inside the label is only followed after proving that the
+/// whole SID lies inside `buf`; nothing outside the slice is ever read, and nothing is
+/// dereferenced through a typed reference, so alignment of `buf` does not matter here.
+fn parse_integrity_label(buf: &[u8]) -> Result<IntegrityLevel, IntegrityError> {
+    use std::mem::size_of;
+    const SID_HEADER: usize = 8; // revision, subauthority count, 6-byte identifier authority
+    if buf.len() < size_of::<TOKEN_MANDATORY_LABEL>() {
+        return Err(IntegrityError::Malformed);
+    }
+    let base = buf.as_ptr() as usize;
+    let end = base + buf.len();
+    // The first field of the label is the SID pointer.
+    let mut raw = [0u8; size_of::<usize>()];
+    raw.copy_from_slice(&buf[..size_of::<usize>()]);
+    let sid = usize::from_ne_bytes(raw);
+    let first = base + size_of::<TOKEN_MANDATORY_LABEL>();
+    let header_end = sid
+        .checked_add(SID_HEADER)
+        .ok_or(IntegrityError::Malformed)?;
+    if sid < first || header_end > end {
+        return Err(IntegrityError::Malformed);
+    }
+    let off = sid - base;
+    let count = usize::from(buf[off + 1]);
+    if count == 0 {
+        return Err(IntegrityError::Malformed);
+    }
+    let sid_end = off + SID_HEADER + 4 * count;
+    if sid_end > buf.len() {
+        return Err(IntegrityError::Malformed);
+    }
+    let mut rid = [0u8; 4];
+    rid.copy_from_slice(&buf[sid_end - 4..sid_end]);
+    Ok(IntegrityLevel(u32::from_le_bytes(rid)))
+}
+
+fn integrity_of(process: HANDLE) -> Result<IntegrityLevel, IntegrityError> {
+    let mut token = HANDLE::default();
+    // SAFETY: valid out-pointer; on success the guard below owns and closes the token.
+    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut token) }
+        .map_err(|_| IntegrityError::OpenToken)?;
+    let token = OwnedHandle(token);
+    // First call: learn the size. It must fail with a length (a null buffer cannot succeed).
+    let mut needed = 0u32;
+    // SAFETY: null buffer with zero length is the documented size query; `needed` is valid.
+    let _ = unsafe { GetTokenInformation(token.0, TokenIntegrityLevel, None, 0, &mut needed) };
+    let needed = needed as usize;
+    if needed < std::mem::size_of::<TOKEN_MANDATORY_LABEL>() || needed > TOKEN_LABEL_MAX {
+        return Err(IntegrityError::Query);
+    }
+    // u64 storage gives the 8-byte alignment the label's pointer field wants.
+    let mut storage = vec![0u64; needed.div_ceil(8)];
+    let capacity = storage.len() * 8;
+    let mut written = 0u32;
+    // SAFETY: `storage` is valid for `capacity` bytes and outlives the call and the parse.
+    unsafe {
+        GetTokenInformation(
+            token.0,
+            TokenIntegrityLevel,
+            Some(storage.as_mut_ptr().cast()),
+            capacity as u32,
+            &mut written,
+        )
+    }
+    .map_err(|_| IntegrityError::Query)?;
+    let written = written as usize;
+    if written > capacity {
+        return Err(IntegrityError::Malformed);
+    }
+    // SAFETY: `written <= capacity` bytes of the u64 buffer were initialised by the call.
+    let bytes = unsafe { std::slice::from_raw_parts(storage.as_ptr().cast::<u8>(), written) };
+    parse_integrity_label(bytes)
+}
+
+/// How the window's process compares with ours for synthetic input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reach {
+    /// Same or lower integrity: SendInput can reach it.
+    Reachable,
+    /// Higher integrity: UIPI blocks our input.
+    Blocked,
+    /// Either token could not be read. Callers treat this like `Blocked` and copy instead.
+    Unknown,
+}
+
+pub fn reach(w: Window) -> Reach {
     // SAFETY: pseudo-handle, no close needed.
-    let Some(ours) = integrity_of(unsafe { GetCurrentProcess() }) else {
-        return false;
+    let Ok(ours) = integrity_of(unsafe { GetCurrentProcess() }) else {
+        return Reach::Unknown;
     };
-    match with_process(pid_and_thread(w).0, integrity_of) {
-        Some(theirs) => theirs > ours,
-        None => true,
+    match with_process(pid_and_thread(w).0, |p| integrity_of(p).ok()) {
+        Some(theirs) if theirs > ours => Reach::Blocked,
+        Some(_) => Reach::Reachable,
+        None => Reach::Unknown,
     }
 }
 
@@ -170,5 +253,88 @@ pub fn message_window() -> windows::core::Result<HWND> {
             None,
             None,
         )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A synthetic label: SID_AND_ATTRIBUTES (pointer, attributes) followed by the SID bytes.
+    fn label(count: u8, subs: &[u32], pointer: Option<usize>) -> Vec<u64> {
+        let mut bytes = vec![0u8; 16];
+        bytes.extend([1, count, 0, 0, 0, 0, 0, 16]);
+        for s in subs {
+            bytes.extend(s.to_le_bytes());
+        }
+        let mut words = vec![0u64; bytes.len().div_ceil(8)];
+        // SAFETY: the u64 buffer is at least `bytes.len()` bytes long.
+        let dst = unsafe {
+            std::slice::from_raw_parts_mut(words.as_mut_ptr().cast::<u8>(), words.len() * 8)
+        };
+        dst[..bytes.len()].copy_from_slice(&bytes);
+        let base = words.as_ptr() as usize;
+        let sid = pointer.unwrap_or(base + 16);
+        dst[..8].copy_from_slice(&sid.to_ne_bytes());
+        words
+    }
+
+    fn view(words: &[u64], len: usize) -> &[u8] {
+        // SAFETY: `len` never exceeds the buffer in these tests.
+        unsafe { std::slice::from_raw_parts(words.as_ptr().cast::<u8>(), len) }
+    }
+
+    #[test]
+    fn integrity_label_parses_last_subauthority() {
+        let w = label(1, &[0x2000], None);
+        assert_eq!(
+            parse_integrity_label(view(&w, 28)),
+            Ok(IntegrityLevel(0x2000))
+        );
+        let w = label(2, &[7, 0x3000], None);
+        assert_eq!(
+            parse_integrity_label(view(&w, 32)),
+            Ok(IntegrityLevel(0x3000))
+        );
+    }
+
+    #[test]
+    fn integrity_label_rejects_bad_structures() {
+        let w = label(0, &[], None);
+        assert_eq!(
+            parse_integrity_label(view(&w, 24)),
+            Err(IntegrityError::Malformed)
+        );
+        // Claims two subauthorities but only one is inside the returned bytes.
+        let w = label(2, &[0x2000], None);
+        assert_eq!(
+            parse_integrity_label(view(&w, 28)),
+            Err(IntegrityError::Malformed)
+        );
+        // SID pointer outside the buffer, and one pointing into the header.
+        let w = label(1, &[0x2000], Some(8));
+        assert_eq!(
+            parse_integrity_label(view(&w, 28)),
+            Err(IntegrityError::Malformed)
+        );
+        let w = label(1, &[0x2000], Some(usize::MAX - 2));
+        assert_eq!(
+            parse_integrity_label(view(&w, 28)),
+            Err(IntegrityError::Malformed)
+        );
+        // Too short to hold the label header.
+        let w = label(1, &[0x2000], None);
+        assert_eq!(
+            parse_integrity_label(view(&w, 8)),
+            Err(IntegrityError::Malformed)
+        );
+    }
+
+    #[test]
+    fn own_integrity_is_readable() {
+        // Reads only our own process token.
+        // SAFETY: pseudo-handle.
+        let level = integrity_of(unsafe { GetCurrentProcess() }).expect("own token");
+        assert!(level.0 >= 0x1000);
     }
 }

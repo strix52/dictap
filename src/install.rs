@@ -199,6 +199,7 @@ fn make_shortcut(exe: &Path, dir: &Path) -> windows::core::Result<()> {
         let _ = CoInitializeEx(None, COINIT_APARTMENTTHREADED);
         let link: IShellLinkW = CoCreateInstance(&ShellLink, None, CLSCTX_INPROC_SERVER)?;
         link.SetPath(&HSTRING::from(exe.as_os_str()))?;
+        link.SetArguments(&HSTRING::from("--history"))?;
         link.SetWorkingDirectory(&HSTRING::from(dir.as_os_str()))?;
         link.SetDescription(&HSTRING::from(env!("CARGO_PKG_DESCRIPTION")))?;
         link.SetIconLocation(&HSTRING::from(exe.as_os_str()), 0)?;

@@ -39,34 +39,80 @@ fn key(vk: u16, up: bool) -> INPUT {
     }
 }
 
-fn send(inputs: &[INPUT]) -> bool {
+/// How much of a keystroke sequence Windows accepted.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Sent {
+    All,
+    /// Some events were injected and some weren't: the target may have seen half a chord.
+    Partial,
+    /// None were (UIPI, secure desktop, another thread holding the input queue).
+    Blocked,
+}
+
+pub fn classify(sent: usize, expected: usize) -> Sent {
+    match sent {
+        0 => Sent::Blocked,
+        n if n == expected => Sent::All,
+        _ => Sent::Partial,
+    }
+}
+
+fn send(inputs: &[INPUT]) -> Sent {
+    classify(send_count(inputs), inputs.len())
+}
+
+fn send_count(inputs: &[INPUT]) -> usize {
     // SAFETY: valid INPUT slice.
     let sent = unsafe { SendInput(inputs, size_of::<INPUT>() as i32) };
-    sent as usize == inputs.len()
+    sent as usize
+}
+
+fn unreleased(events: &[(u16, bool)], accepted: usize) -> Vec<u16> {
+    let mut down = Vec::new();
+    for &(vk, up) in events.iter().take(accepted) {
+        if up {
+            down.retain(|&k| k != vk);
+        } else if !down.contains(&vk) {
+            down.push(vk);
+        }
+    }
+    down
 }
 
 /// Sends Ctrl+V (Ctrl+Shift+V for terminals). Modifiers the user is still holding are
 /// released first so they don't turn it into e.g. Ctrl+Win+V, then pressed again.
-/// Returns false if Windows blocked the input (UIPI, secure desktop).
-pub fn paste(terminal: bool) -> bool {
+/// Reports whether Windows took every event, only some, or none.
+pub fn paste(terminal: bool) -> Sent {
     // SAFETY: plain query.
     let held: Vec<u16> = MODIFIERS
         .into_iter()
         .filter(|&vk| unsafe { GetAsyncKeyState(i32::from(vk)) } < 0)
         .collect();
 
-    let mut inputs: Vec<INPUT> = held.iter().map(|&vk| key(vk, true)).collect();
-    inputs.push(key(LCTRL, false));
+    let mut events: Vec<(u16, bool)> = held.iter().map(|&vk| (vk, true)).collect();
+    events.push((LCTRL, false));
     if terminal {
-        inputs.push(key(LSHIFT, false));
+        events.push((LSHIFT, false));
     }
-    inputs.push(key(V, false));
-    inputs.push(key(V, true));
+    events.push((V, false));
+    events.push((V, true));
     if terminal {
-        inputs.push(key(LSHIFT, true));
+        events.push((LSHIFT, true));
     }
-    inputs.push(key(LCTRL, true));
-    let ok = send(&inputs);
+    events.push((LCTRL, true));
+    let inputs: Vec<INPUT> = events.iter().map(|&(vk, up)| key(vk, up)).collect();
+    let accepted = send_count(&inputs);
+    let ok = classify(accepted, inputs.len());
+    if ok == Sent::Partial {
+        let cleanup: Vec<INPUT> = unreleased(&events, accepted)
+            .into_iter()
+            .rev()
+            .map(|vk| key(vk, true))
+            .collect();
+        if !cleanup.is_empty() {
+            send(&cleanup);
+        }
+    }
 
     // Only re-press what the user is still holding; a key let go meanwhile would otherwise
     // stay stuck down.
@@ -79,4 +125,33 @@ pub fn paste(terminal: bool) -> bool {
         send(&restore);
     }
     ok
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn partial_chords_release_only_accepted_unbalanced_downs() {
+        let events = [
+            (LCTRL, false),
+            (LSHIFT, false),
+            (V, false),
+            (V, true),
+            (LSHIFT, true),
+            (LCTRL, true),
+        ];
+        assert!(unreleased(&events, 0).is_empty());
+        assert_eq!(unreleased(&events, 1), vec![LCTRL]);
+        assert_eq!(unreleased(&events, 3), vec![LCTRL, LSHIFT, V]);
+        assert_eq!(unreleased(&events, 4), vec![LCTRL, LSHIFT]);
+        assert!(unreleased(&events, 6).is_empty());
+    }
+
+    #[test]
+    fn classifies_the_sendinput_count() {
+        assert_eq!(classify(4, 4), Sent::All);
+        assert_eq!(classify(0, 4), Sent::Blocked);
+        assert_eq!(classify(2, 4), Sent::Partial);
+    }
 }

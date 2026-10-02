@@ -7,11 +7,14 @@ mod core;
 mod event;
 mod gemini;
 mod hotkey;
+mod hud;
 mod import;
 mod install;
 mod key;
 mod logger;
+mod outcome;
 mod paste;
+mod persist;
 mod settings;
 mod sound;
 mod store;
@@ -62,9 +65,17 @@ fn main() {
         return;
     }
     // SAFETY: named mutex kept for the life of the process; the handle is intentionally leaked.
-    let _mutex = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX) };
-    // SAFETY: plain query right after the create call.
-    if unsafe { GetLastError() } == ERROR_ALREADY_EXISTS {
+    let mutex = unsafe { CreateMutexW(None, false, INSTANCE_MUTEX) };
+    // SAFETY: plain query, made immediately after the create call and before anything that
+    // could overwrite the thread's last error.
+    let last_error = unsafe { GetLastError() };
+    if mutex.is_err() {
+        // Not the same as "another copy is running": we can't tell, so don't start a second.
+        overlay::show("Couldn't start", Tone::Error, Some(Duration::from_secs(5)));
+        std::thread::sleep(Duration::from_secs(5));
+        return;
+    }
+    if last_error == ERROR_ALREADY_EXISTS {
         win::ipc::signal_existing(win::app::Page::from_args());
         return;
     }
